@@ -12,11 +12,18 @@
 
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { nativeIsRepo, nativeCommit, nativeResetHard, nativeBranchDelete } from "../native-git-bridge.js";
+import {
+  assertWorktreeMaterialized,
+  nativeBranchDelete,
+  nativeCommit,
+  nativeIsRepo,
+  nativeResetHard,
+  nativeWorktreeAdd,
+} from "../native-git-bridge.js";
 
 // Note: prior static-analysis tests that scanned native-git-bridge.ts for
 // the raw shell-spawn pattern were removed under #4827 — the integration
@@ -113,6 +120,31 @@ describe("native-git-bridge #4180: fallback runtime behaviour", () => {
     assert.throws(
       () => nativeBranchDelete(repo, "does-not-exist"),
       /GSD_GIT_ERROR|git branch -D does-not-exist failed/,
+    );
+  });
+
+  test("assertWorktreeMaterialized rejects directories without a .git file", (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "ngb-worktree-missing-git-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+    assert.throws(
+      () => assertWorktreeMaterialized(dir),
+      /missing \.git file/,
+    );
+  });
+
+  test("nativeWorktreeAdd materializes a valid .git marker", (t) => {
+    const wtPath = join(repo, ".gsd", "worktrees", "M001");
+    t.after(() => {
+      try { git(["worktree", "remove", "--force", wtPath], repo); } catch { /* noop */ }
+    });
+
+    nativeWorktreeAdd(repo, wtPath, "milestone/M001", true, "HEAD");
+
+    assert.equal(
+      existsSync(join(wtPath, ".git")),
+      true,
+      "created worktree must have the .git file required by later health checks",
     );
   });
 });

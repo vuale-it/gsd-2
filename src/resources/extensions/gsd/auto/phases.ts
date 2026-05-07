@@ -77,6 +77,17 @@ function isSamePathLocal(a: string, b: string): boolean {
   return normalizeWorktreePathForCompare(a) === normalizeWorktreePathForCompare(b);
 }
 
+export function shouldDegradeEmptyWorktreeToProjectRoot(
+  worktreeClassification: ReturnType<typeof classifyProject>,
+  projectRootClassification: ReturnType<typeof classifyProject>,
+): boolean {
+  return (
+    worktreeClassification.kind === "greenfield" &&
+    projectRootClassification.kind !== "greenfield" &&
+    projectRootClassification.kind !== "invalid-repo"
+  );
+}
+
 // ─── Session timeout auto-resume state ────────────────────────────────────────
 
 let consecutiveSessionTimeouts = 0;
@@ -1575,6 +1586,29 @@ export async function runUnitPhase(
         return { action: "break", reason: "worktree-invalid" };
       }
     } else if (projectClassification.kind === "greenfield") {
+      const projectRoot = s.canonicalProjectRoot;
+      if (!isSamePathLocal(s.basePath, projectRoot)) {
+        const projectRootClassification = classifyProject(projectRoot);
+        if (shouldDegradeEmptyWorktreeToProjectRoot(projectClassification, projectRootClassification)) {
+          debugLog("runUnitPhase", {
+            phase: "worktree-health-degrade-to-project-root",
+            worktreePath: s.basePath,
+            projectRoot,
+            worktreeClassification: projectClassification,
+            projectRootClassification,
+          });
+          ctx.ui.notify(
+            `Warning: ${s.basePath} has no project content, but ${projectRoot} does. Continuing in project root because the milestone worktree cannot represent untracked project files.`,
+            "warning",
+          );
+          s.basePath = projectRoot;
+          s.isolationDegraded = true;
+          projectClassification = projectRootClassification;
+        }
+      }
+    }
+
+    if (projectClassification.kind === "greenfield") {
       debugLog("runUnitPhase", { phase: "worktree-health-greenfield", basePath: s.basePath, classification: projectClassification });
       ctx.ui.notify(`Warning: ${s.basePath} has no project content yet — proceeding as greenfield project`, "warning");
     } else if (projectClassification.kind === "untyped-existing") {
