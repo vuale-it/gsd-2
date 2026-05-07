@@ -306,7 +306,7 @@ export async function dispatchDirectPhase(
       return;
     }
 
-    const result = await ctx.newSession();
+    const result = await ctx.newSession({ cwd: dispatchBase });
     if (result.cancelled) {
       ctx.ui.notify("Session creation cancelled.", "warning");
       return;

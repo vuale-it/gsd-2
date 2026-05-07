@@ -173,6 +173,8 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
+	/** Explicit working directory for the new session/tool runtime. */
+	cwd?: string;
 	/** See ExtensionCommandContext.newSession for docs (#3731). */
 	abortSignal?: AbortSignal;
 }) => Promise<{ cancelled: boolean }>;

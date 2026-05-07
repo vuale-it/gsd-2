@@ -1645,6 +1645,8 @@ export class AgentSession {
 	async newSession(options?: {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
+		/** Explicit working directory for the new session/tool runtime. */
+		cwd?: string;
 		/** See ExtensionCommandContext.newSession for docs (#3731). */
 		abortSignal?: AbortSignal;
 	}): Promise<boolean> {
@@ -1679,10 +1681,11 @@ export class AgentSession {
 		} finally {
 			this._sessionSwitchPending = false;
 		}
-		// Update cwd to current process directory — auto-mode may have chdir'd
-		// into a worktree since the original session was created.
+		// Update cwd for the new tool runtime. Auto-mode passes an explicit cwd
+		// so session routing does not depend on global process.cwd() after
+		// worktree merge/teardown. Other callers keep the historical behavior.
 		const previousCwd = this._cwd;
-		this._cwd = process.cwd();
+		this._cwd = options?.cwd ?? process.cwd();
 		this.sessionManager.newSession({ parentSession: options?.parentSession });
 		this.agent.sessionId = this.sessionManager.getSessionId();
 		this._steeringMessages = [];

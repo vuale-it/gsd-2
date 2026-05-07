@@ -31,6 +31,13 @@ import { approvalGateIdForUnit, isExplicitApprovalResponse, shouldPauseForUserAp
 let isFirstSession = true;
 let approvalQuestionAbortInFlight = false;
 
+interface DeferredApprovalGate {
+  gateId: string;
+  basePath: string;
+}
+
+let deferredApprovalGate: DeferredApprovalGate | null = null;
+
 async function deriveGsdState(basePath: string) {
   const { deriveState } = await import("../state.js");
   return deriveState(basePath);
@@ -83,6 +90,46 @@ async function applyCompactionThresholdOverride(ctx: ExtensionContext): Promise<
   } catch {
     // Non-fatal: leave any existing override in place.
   }
+}
+
+function clearDeferredApprovalGate(basePath?: string): void {
+  if (!basePath || deferredApprovalGate?.basePath === basePath) {
+    deferredApprovalGate = null;
+  }
+}
+
+function deferApprovalGate(gateId: string, basePath: string): void {
+  deferredApprovalGate = { gateId, basePath };
+}
+
+function activateDeferredApprovalGate(basePath: string): void {
+  if (deferredApprovalGate?.basePath !== basePath) return;
+  setPendingGate(deferredApprovalGate.gateId, basePath);
+  deferredApprovalGate = null;
+}
+
+function isContextDraftSummarySave(toolName: string, input: unknown): boolean {
+  if (toolName !== "gsd_summary_save" && toolName !== "summary_save") return false;
+  if (!input || typeof input !== "object") return false;
+  return (input as { artifact_type?: unknown }).artifact_type === "CONTEXT-DRAFT";
+}
+
+function shouldBlockDeferredApprovalTool(
+  toolName: string,
+  input: unknown,
+  basePath: string,
+): { block: boolean; reason?: string } {
+  if (deferredApprovalGate?.basePath !== basePath) return { block: false };
+  if (toolName === "ask_user_questions") return { block: false };
+  if (isContextDraftSummarySave(toolName, input)) return { block: false };
+  return {
+    block: true,
+    reason: [
+      `HARD BLOCK: Approval question "${deferredApprovalGate.gateId}" has been shown to the user.`,
+      `Only CONTEXT-DRAFT persistence may finish in this same assistant turn.`,
+      `Wait for the user's answer before calling additional tools.`,
+    ].join(" "),
+  };
 }
 
 export function resolveNotificationStoreBasePath(cwd: string = process.cwd()): string {
@@ -140,6 +187,7 @@ export function registerHooks(
     resetWriteGateState(process.cwd());
     resetToolCallLoopGuard();
     approvalQuestionAbortInFlight = false;
+    clearDeferredApprovalGate();
     await resetAskUserQuestionsTurnCache();
     await syncServiceTierStatus(ctx);
     await applyDisabledModelProviderPolicy(ctx);
@@ -189,6 +237,7 @@ export function registerHooks(
     initSessionNotifications(ctx);
     resetWriteGateState(process.cwd());
     resetToolCallLoopGuard();
+    clearDeferredApprovalGate();
     await resetAskUserQuestionsTurnCache();
     clearDiscussionFlowState(process.cwd());
     await syncServiceTierStatus(ctx);
@@ -225,6 +274,7 @@ export function registerHooks(
       if (milestoneId) markDepthVerified(milestoneId, beforeAgentBasePath);
       clearPendingGate(beforeAgentBasePath);
     }
+    clearDeferredApprovalGate(beforeAgentBasePath);
 
     // GSD's own context injection (existing behavior — unchanged).
     const { buildBeforeAgentStartResult } = await import("./system-context.js");
@@ -275,7 +325,11 @@ export function registerHooks(
     resetToolCallLoopGuard();
     await resetAskUserQuestionsTurnCache();
     const { handleAgentEnd } = await import("./agent-end-recovery.js");
-    await handleAgentEnd(pi, event, ctx);
+    try {
+      await handleAgentEnd(pi, event, ctx);
+    } finally {
+      activateDeferredApprovalGate(process.cwd());
+    }
   });
 
   // Squash-merge quick-task branch back to the original branch after the
@@ -377,15 +431,16 @@ export function registerHooks(
     if (!shouldPauseForUserApprovalQuestion(unitType, [event.message])) return;
 
     const gateId = approvalGateIdForUnit(unitType, unitId);
-    if (gateId) setPendingGate(gateId, process.cwd());
+    if (gateId) deferApprovalGate(gateId, process.cwd());
 
     approvalQuestionAbortInFlight = true;
     ctx.ui.notify(
       `${unitType}${unitId ? ` ${unitId}` : ""} is waiting for your approval - pausing before more tool calls run.`,
       "info",
     );
-    // The pending gate set above blocks subsequent non-read-only tool calls
-    // via the tool_call hook below, so we do not abort the in-flight stream.
+    // The durable pending gate is activated at agent_end so same-turn
+    // CONTEXT-DRAFT persistence can finish after the text boundary streams.
+    // The tool_call hook below still blocks non-draft tools in this turn.
     // Aborting mid-stream eats the model's question text on external CLI
     // providers (Claude Code SDK) because lastTextContent isn't populated
     // from in-flight builder state — the user only ever sees "Claude Code
@@ -416,6 +471,13 @@ export function registerHooks(
     if (loopCheck.block) {
       return { block: true, reason: loopCheck.reason };
     }
+
+    const deferredGateGuard = shouldBlockDeferredApprovalTool(
+      toolName,
+      event.input,
+      discussionBasePath,
+    );
+    if (deferredGateGuard.block) return deferredGateGuard;
 
     // ── Discussion gate enforcement: track pending gate questions ─────────
     // Only gate-shaped ask_user_questions calls should block execution.

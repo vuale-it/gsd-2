@@ -85,7 +85,10 @@ export async function runUnit(
   const sessionAbortController = new AbortController();
   _setSessionSwitchInFlight(true);
   try {
-    const sessionPromise = s.cmdCtx!.newSession({ abortSignal: sessionAbortController.signal }).finally(() => {
+    const sessionPromise = s.cmdCtx!.newSession({
+      abortSignal: sessionAbortController.signal,
+      cwd: s.basePath,
+    }).finally(() => {
       if (sessionSwitchGeneration === mySessionSwitchGeneration) {
         _setSessionSwitchInFlight(false);
       }

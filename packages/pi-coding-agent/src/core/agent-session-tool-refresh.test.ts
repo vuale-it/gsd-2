@@ -130,4 +130,22 @@ describe("#3616 — newSession() restores narrowed tool set when cwd unchanged",
 			"cwd-changed branch must rebuild with includeAllExtensionTools: true",
 		);
 	});
+
+	it("uses explicit cwd option instead of process.cwd() when rebuilding runtime", async () => {
+		const session = await createSession();
+		const explicitCwd = mkdtempSync(join(testDir, "explicit-cwd-"));
+		(session as any)._cwd = process.cwd();
+
+		let buildRuntimeCalled = false;
+		const originalBuild = (session as any)._buildRuntime.bind(session);
+		(session as any)._buildRuntime = (options?: { includeAllExtensionTools?: boolean }) => {
+			buildRuntimeCalled = true;
+			return originalBuild(options);
+		};
+
+		const ok = await session.newSession({ cwd: explicitCwd });
+		assert.equal(ok, true);
+		assert.equal((session as any)._cwd, explicitCwd);
+		assert.ok(buildRuntimeCalled, "explicit cwd differing from prior cwd must rebuild runtime");
+	});
 });

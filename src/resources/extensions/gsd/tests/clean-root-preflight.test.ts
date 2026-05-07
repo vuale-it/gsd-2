@@ -131,9 +131,11 @@ test("postflightPopStash — restores stashed changes and emits info notificatio
     run('git commit -m "simulate merge"', repo);
 
     const postNotifications: Array<{ msg: string; level: string }> = [];
-    postflightPopStash(repo, "M004", preflight.stashMarker, (msg, level) => {
+    const postflight = postflightPopStash(repo, "M004", preflight.stashMarker, (msg, level) => {
       postNotifications.push({ msg, level });
     });
+    assert.equal(postflight.restored, true, "postflight must report successful restore");
+    assert.equal(postflight.needsManualRecovery, false, "successful restore must not need manual recovery");
 
     // The stashed README.md change must be restored
     const content = readFileSync(join(repo, "README.md"), "utf-8");
@@ -171,7 +173,8 @@ test("preflight + merge + postflight round-trip preserves uncommitted changes", 
     run('git commit -m "feat: add feature"', repo);
 
     // Postflight: pop stash
-    postflightPopStash(repo, "M005", preflight.stashMarker, () => {});
+    const postflight = postflightPopStash(repo, "M005", preflight.stashMarker, () => {});
+    assert.equal(postflight.needsManualRecovery, false, "clean restore must not stop auto-mode");
 
     // README.md must still have our local content
     const restored = readFileSync(join(repo, "README.md"), "utf-8");
@@ -197,9 +200,12 @@ test("postflightPopStash conflict warning names the exact stash ref", () => {
     run('git commit -m "simulate conflicting merge"', repo);
 
     const notifications: Array<{ msg: string; level: string }> = [];
-    postflightPopStash(repo, "M005C", preflight.stashMarker, (msg, level) => {
+    const postflight = postflightPopStash(repo, "M005C", preflight.stashMarker, (msg, level) => {
       notifications.push({ msg, level });
     });
+    assert.equal(postflight.restored, false, "conflicted restore must report restored=false");
+    assert.equal(postflight.needsManualRecovery, true, "conflicted restore must require manual recovery");
+    assert.match(postflight.message, /failed after merge of milestone M005C/);
 
     const warning = notifications.find((n) => n.level === "warning")?.msg ?? "";
     assert.match(warning, /git stash pop stash@\{\d+\}/);
@@ -219,7 +225,8 @@ test("postflightPopStash restores the matching GSD stash, not stash@{0}", () => 
     writeFileSync(join(repo, "other.txt"), "other stash\n");
     run('git stash push --include-untracked -m "unrelated newer stash"', repo);
 
-    postflightPopStash(repo, "M006", preflight.stashMarker, () => {});
+    const postflight = postflightPopStash(repo, "M006", preflight.stashMarker, () => {});
+    assert.equal(postflight.needsManualRecovery, false, "targeted restore must not need manual recovery");
 
     const content = readFileSync(join(repo, "README.md"), "utf-8");
     assert.equal(content.replace(/\r\n/g, "\n"), "# target stash\n");
@@ -242,7 +249,8 @@ test("postflightPopStash restores the exact preflight marker when another same-m
     writeFileSync(join(repo, "same-milestone.txt"), "newer same milestone stash\n");
     run('git stash push --include-untracked -m "gsd-preflight-stash [gsd-preflight-stash:M007:other]"', repo);
 
-    postflightPopStash(repo, "M007", preflight.stashMarker, () => {});
+    const postflight = postflightPopStash(repo, "M007", preflight.stashMarker, () => {});
+    assert.equal(postflight.needsManualRecovery, false, "exact marker restore must not need manual recovery");
 
     const content = readFileSync(join(repo, "README.md"), "utf-8");
     assert.equal(content.replace(/\r\n/g, "\n"), "# target stash\n");
@@ -260,7 +268,8 @@ test("postflightPopStash falls back to milestone marker prefix when exact marker
     writeFileSync(join(repo, "README.md"), "# fallback stash\n");
     run('git stash push --include-untracked -m "gsd-preflight-stash [gsd-preflight-stash:M008:fallback]"', repo);
 
-    postflightPopStash(repo, "M008", undefined, () => {});
+    const postflight = postflightPopStash(repo, "M008", undefined, () => {});
+    assert.equal(postflight.needsManualRecovery, false, "fallback marker restore must not need manual recovery");
 
     const content = readFileSync(join(repo, "README.md"), "utf-8");
     assert.equal(content.replace(/\r\n/g, "\n"), "# fallback stash\n");

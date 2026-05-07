@@ -3,13 +3,13 @@
  *
  * #2909: Adds a fast-path git status check before milestone completion merges.
  * When the working tree is dirty the user is warned and changes are auto-stashed
- * so the merge can proceed cleanly.  After the merge completes, postflightPopStash
- * restores the stashed changes.
+ * so the merge can proceed cleanly. After the merge completes, postflightPopStash
+ * restores the stashed changes and reports whether manual recovery is needed.
  *
  * Design constraints (from Trek-e approval):
  *  - Warn the user before stashing (no silent surprises)
  *  - git stash push / git stash pop only — no custom stash management layer
- *  - Stash/pop errors are logged but MUST NOT block the merge
+ *  - Stash/pop errors are logged but MUST NOT block the merge itself
  *  - Fast-path status check — clean trees pay no extra cost
  */
 
@@ -25,6 +25,13 @@ export interface PreflightResult {
   stashMarker?: string;
   /** human-readable summary of what happened (empty string for clean trees) */
   summary: string;
+}
+
+export interface PostflightResult {
+  restored: boolean;
+  needsManualRecovery: boolean;
+  message: string;
+  stashRef?: string;
 }
 
 function findPreflightStashRef(basePath: string, milestoneId: string, stashMarker?: string): string | null {
@@ -112,14 +119,15 @@ export function preflightCleanRoot(
  *
  * Only called when preflightCleanRoot returned stashPushed=true.
  * Any pop error (e.g. conflict) is logged and notified but does NOT throw —
- * the merge already completed successfully.
+ * the merge already completed successfully. Callers must treat
+ * needsManualRecovery=true as a dirty workspace stop, not a clean completion.
  */
 export function postflightPopStash(
   basePath: string,
   milestoneId: string,
   stashMarker: string | undefined,
   notify: (message: string, level: "info" | "warning" | "error") => void,
-): void {
+): PostflightResult {
   let stashRef: string | null = null;
   try {
     stashRef = findPreflightStashRef(basePath, milestoneId, stashMarker);
@@ -127,7 +135,11 @@ export function postflightPopStash(
       const msg = `No matching GSD preflight stash found for milestone ${milestoneId}; leaving stash list untouched.`;
       logWarning("preflight", msg);
       notify(msg, "warning");
-      return;
+      return {
+        restored: false,
+        needsManualRecovery: true,
+        message: msg,
+      };
     }
     execFileSync("git", ["stash", "pop", stashRef], {
       cwd: basePath,
@@ -135,7 +147,14 @@ export function postflightPopStash(
       encoding: "utf-8",
       env: GIT_NO_PROMPT_ENV,
     });
-    notify(`Restored stashed changes after milestone ${milestoneId} merge.`, "info");
+    const msg = `Restored stashed changes after milestone ${milestoneId} merge.`;
+    notify(msg, "info");
+    return {
+      restored: true,
+      needsManualRecovery: false,
+      message: msg,
+      stashRef,
+    };
   } catch (err) {
     // Pop conflicts mean the merged code collides with the stashed changes.
     // Log a warning — the user needs to resolve manually, but the merge succeeded.
@@ -145,5 +164,11 @@ export function postflightPopStash(
     const msg = `git stash pop ${stashRef ?? ""}`.trim() + ` failed after merge of milestone ${milestoneId}: ${err instanceof Error ? err.message : String(err)}. ${restoreHint}`;
     logWarning("preflight", msg);
     notify(msg, "warning");
+    return {
+      restored: false,
+      needsManualRecovery: true,
+      message: msg,
+      ...(stashRef ? { stashRef } : {}),
+    };
   }
 }

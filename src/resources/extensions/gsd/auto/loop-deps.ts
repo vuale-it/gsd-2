@@ -23,7 +23,7 @@ import type { CmuxLogLevel } from "../../shared/cmux-events.js";
 import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
-import type { PreflightResult } from "../clean-root-preflight.js";
+import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
 
 type PauseAutoFn = (
   ctx?: ExtensionContext,
@@ -141,7 +141,7 @@ export interface LoopDeps {
     milestoneId: string,
     stashMarker: string | undefined,
     notify: (message: string, level: "info" | "warning" | "error") => void,
-  ) => void;
+  ) => PostflightResult;
 
   // Budget/context/secrets
   getLedger: () => unknown;

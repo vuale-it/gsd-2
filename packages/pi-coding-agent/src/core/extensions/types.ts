@@ -309,6 +309,9 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	newSession(options?: {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
+		/** Explicit working directory for the new session/tool runtime.
+		 *  When omitted, newSession() captures process.cwd() for backwards compatibility. */
+		cwd?: string;
 		/** When aborted before the session is fully configured, newSession() returns
 		 *  early without rebuilding the tool runtime. Used by runUnit() to discard
 		 *  a late-resolving newSession() after the session-creation timeout fires,
@@ -1759,6 +1762,8 @@ export interface ExtensionCommandContextActions {
 	newSession: (options?: {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
+		/** See ExtensionCommandContext.newSession for docs. */
+		cwd?: string;
 		/** See ExtensionCommandContext.newSession for docs (#3731). */
 		abortSignal?: AbortSignal;
 	}) => Promise<{ cancelled: boolean }>;
