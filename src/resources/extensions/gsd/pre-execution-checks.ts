@@ -380,6 +380,8 @@ function shouldValidateInputAsPath(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return false;
 
+  if (isRuntimeOnlyInput(trimmed)) return false;
+
   const candidate = extractPathFromAnnotation(trimmed);
   if (!candidate) return false;
 
@@ -403,6 +405,10 @@ function shouldValidateInputAsPath(raw: string): boolean {
     /[\\/]/.test(candidate) ||
     /[*?[\]{}]/.test(candidate)
   );
+}
+
+function isRuntimeOnlyInput(raw: string): boolean {
+  return /\(\s*runtime\s*\)/i.test(raw);
 }
 
 function containsGlobPattern(candidate: string): boolean {
@@ -535,6 +541,7 @@ export function checkTaskOrdering(
     const filesToCheck = [...task.inputs];
 
     for (const file of filesToCheck) {
+      if (isRuntimeOnlyInput(file)) continue;
       if (!shouldValidateInputAsPath(file)) continue;
 
       const normalizedFile = normalizeFilePath(file);
