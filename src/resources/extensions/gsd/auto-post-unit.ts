@@ -1320,8 +1320,11 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
         const strictMode = prefs?.enhanced_verification_strict === true;
 
-        // Run pre-execution checks
-        const result: PreExecutionResult = await runPreExecutionChecks(tasks, s.basePath);
+        // Run pre-execution checks against the canonical project root. In
+        // worktree isolation, s.basePath can point at a metadata-only worktree,
+        // while source files remain under the project root.
+        const preExecutionBasePath = s.canonicalProjectRoot;
+        const result: PreExecutionResult = await runPreExecutionChecks(tasks, preExecutionBasePath);
 
         // Log summary to stderr in existing verification output format
         const emoji = result.status === "pass" ? "✅" : result.status === "warn" ? "⚠️" : "❌";
@@ -1338,12 +1341,12 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         }
 
         // Write evidence JSON to slice artifacts directory
-        const slicePath = resolveSlicePath(s.basePath, mid, sid);
+        const slicePath = resolveSlicePath(preExecutionBasePath, mid, sid);
         const evidenceFileName = `${sid}-PRE-EXEC-VERIFY.json`;
         let evidencePath = join(".gsd", "milestones", mid, "slices", sid, evidenceFileName);
         if (slicePath) {
           writePreExecutionEvidence(result, slicePath, mid, sid);
-          evidencePath = relative(s.basePath, join(slicePath, evidenceFileName)) || evidenceFileName;
+          evidencePath = relative(preExecutionBasePath, join(slicePath, evidenceFileName)) || evidenceFileName;
         }
 
         if (uokFlags.gates) {
@@ -1398,6 +1401,9 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             ),
             verdictExcerpt: `status=${result.status}; ${blockingCount} blocking issue${blockingCount === 1 ? "" : "s"} detected`,
           };
+          // Track consecutive pre-exec failures per slice for loop detection.
+          const retryKey = currentUnit.id;
+          s.preExecRetryCount.set(retryKey, (s.preExecRetryCount.get(retryKey) ?? 0) + 1);
           preExecPauseNeeded = true;
         } else if (result.status === "warn") {
           ctx.ui.notify(
@@ -1414,8 +1420,16 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
               ),
               verdictExcerpt: `status=${result.status} (strict mode); ${warnChecks.length} warning${warnChecks.length === 1 ? "" : "s"} treated as blocking`,
             };
+            const retryKey = currentUnit.id;
+            s.preExecRetryCount.set(retryKey, (s.preExecRetryCount.get(retryKey) ?? 0) + 1);
             preExecPauseNeeded = true;
           }
+        }
+
+        // Reset the retry counter when checks pass — a successful re-plan
+        // should not carry over a stale failure count into future slices.
+        if (result.status === "pass") {
+          s.preExecRetryCount.delete(currentUnit.id);
         }
 
         debugLog("postUnitPostVerification", {

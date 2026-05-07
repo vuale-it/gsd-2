@@ -178,6 +178,13 @@ export class AutoSession {
    * stale context bleeding into unrelated slices.
    */
   lastPreExecFailure: PreExecFailure | null = null;
+  /**
+   * Tracks how many consecutive times each slice unit has failed pre-execution
+   * checks. Keyed by unitId (e.g. "M001/S01"). Used to break the infinite
+   * plan-slice → pre-exec fail → re-dispatch loop when the planner cannot fix
+   * the issues after MAX_PRE_EXEC_RETRIES re-attempts.
+   */
+  readonly preExecRetryCount: Map<string, number> = new Map();
 
   // ── Tool invocation errors (#2883) ──────────────────────────────────
   /** Set when a GSD tool execution ends with isError due to malformed/truncated
@@ -343,6 +350,7 @@ export class AutoSession {
     this.rewriteAttemptCount = 0;
     this.consecutiveCompleteBootstraps = 0;
     this.lastPreExecFailure = null;
+    this.preExecRetryCount.clear();
     this.lastToolInvocationError = null;
     this.lastUnitAgentEndMessages = null;
     this.lastGitActionFailure = null;

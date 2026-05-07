@@ -1819,7 +1819,7 @@ describe("checkFilePathConsistency completed-task output exemption (#4071)", () 
     );
   });
 
-  test("pending task at higher index still causes a missing-file error", (t) => {
+  test("pending task at higher index does NOT cause a duplicate consistency error (ordering check handles it)", (t) => {
     const tempDir = join(tmpdir(), `pre-exec-fc-pending-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
     t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -1841,14 +1841,16 @@ describe("checkFilePathConsistency completed-task output exemption (#4071)", () 
       }),
     ];
 
+    // checkFilePathConsistency suppresses the error here because checkTaskOrdering
+    // will fire a more precise "sequence violation" error for the same file.
+    // The combined output of runPreExecutionChecks still flags the issue — just
+    // once, via the ordering check, instead of twice.
     const results = checkFilePathConsistency(tasks, tempDir);
     assert.equal(
       results.length,
-      1,
-      "pending task at higher index must still be flagged — the file is not available yet",
+      0,
+      "consistency check must not duplicate what the ordering check already reports",
     );
-    assert.equal(results[0].blocking, true);
-    assert.equal(results[0].target, "artifacts/output.json");
   });
 });
 

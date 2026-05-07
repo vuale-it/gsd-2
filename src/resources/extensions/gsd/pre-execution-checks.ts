@@ -454,6 +454,16 @@ export function checkFilePathConsistency(
 ): PreExecutionCheckJSON[] {
   const results: PreExecutionCheckJSON[] = [];
 
+  // Build a set of all files created by any task at any position (normalized).
+  // Used to suppress consistency errors for files that will be caught with a
+  // more precise message by checkTaskOrdering (sequence violation).
+  const allTaskOutputs = new Set<string>();
+  for (const t of tasks) {
+    for (const f of t.expected_output) {
+      allTaskOutputs.add(normalizeFilePath(f));
+    }
+  }
+
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
     const priorOutputs = getExpectedOutputsUpTo(tasks, i);
@@ -487,6 +497,12 @@ export function checkFilePathConsistency(
       }
 
       if (!existsOnDisk && !inPriorOutputs && !inOwnOutputs && !directorySatisfied) {
+        // If a later task claims to create this file, the ordering check will
+        // fire a more precise "sequence violation" error for the same file.
+        // Suppress the consistency error here to avoid duplicate noise.
+        if (allTaskOutputs.has(normalizedFile) && !ownOutputs.has(normalizedFile)) {
+          continue;
+        }
         results.push({
           category: "file",
           target: file,

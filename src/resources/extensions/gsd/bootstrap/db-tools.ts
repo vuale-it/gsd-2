@@ -410,7 +410,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
       }
 
       const existingIds = findMilestoneIds(basePath);
-      const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
+      const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
       const allIds = [...new Set([...existingIds, ...getReservedMilestoneIds()])];
       const newId = nextMilestoneId(allIds, uniqueEnabled);
       await ensureMilestoneDbRow(newId, basePath);

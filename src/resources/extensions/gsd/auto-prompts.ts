@@ -2085,8 +2085,17 @@ export async function buildPlanSlicePrompt(
       `The previous plan-slice attempt was blocked by pre-execution validation.\n` +
       `Gate verdict: ${verdictExcerpt}\n\n` +
       `Blocked references that must be resolved in this plan:\n${findingsList}\n\n` +
-      `Revise the plan so that every reference listed above is satisfied before execution begins. ` +
-      `Do not reproduce the same file paths, package names, or task ordering that caused these failures.`,
+      `**How to fix each type of issue:**\n` +
+      `- **"[file] X doesn't exist and isn't created by prior or same-task outputs"**: ` +
+      `Either (a) add an earlier task that creates X on disk before the task that needs it, ` +
+      `or (b) if this task IS the one that creates X, move X from inputs to expected_output. ` +
+      `Do NOT put X in a task's expected_output if that task only reads or verifies X — only tasks that actually write X to disk should list it in expected_output.\n` +
+      `- **"[file] X: Task T_early reads X but it's created by task T_late (sequence violation)"**: ` +
+      `Either (a) reorder tasks so T_late (the creator) runs before T_early (the reader), ` +
+      `or (b) if T_late doesn't actually create X (it only reads/tests it), remove X from T_late's expected_output entirely.\n` +
+      `- **"[package] P not found on npm"**: Either remove the npm install for P, or use the correct package name.\n\n` +
+      `Every file listed in a task's inputs must either exist on disk already or appear in an earlier task's expected_output. ` +
+      `A task's expected_output must only list files it actually writes to disk.`,
     );
   }
   return renderSlicePrompt({
