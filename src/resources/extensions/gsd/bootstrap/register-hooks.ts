@@ -102,6 +102,10 @@ function deferApprovalGate(gateId: string, basePath: string): void {
   deferredApprovalGate = { gateId, basePath };
 }
 
+function contextBasePath(ctx?: { cwd?: string }): string {
+  return typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd();
+}
+
 function activateDeferredApprovalGate(basePath: string): void {
   if (deferredApprovalGate?.basePath !== basePath) return;
   setPendingGate(deferredApprovalGate.gateId, basePath);
@@ -132,12 +136,12 @@ function shouldBlockDeferredApprovalTool(
   };
 }
 
-export function resolveNotificationStoreBasePath(cwd: string = process.cwd()): string {
-  return resolveWorktreeProjectRoot(cwd);
+export function resolveNotificationStoreBasePath(basePath: string): string {
+  return resolveWorktreeProjectRoot(basePath);
 }
 
 function initSessionNotifications(ctx: ExtensionContext): void {
-  initNotificationStore(resolveNotificationStoreBasePath());
+  initNotificationStore(resolveNotificationStoreBasePath(contextBasePath(ctx)));
   installNotifyInterceptor(ctx);
   initNotificationWidget(ctx);
 }
@@ -179,12 +183,13 @@ export function registerHooks(
   ecosystemHandlers: GSDEcosystemBeforeAgentStartHandler[],
 ): void {
   pi.on("session_start", async (_event, ctx) => {
+    const basePath = contextBasePath(ctx);
     initSessionNotifications(ctx);
     if (!isAutoActive()) {
       const { initHealthWidget } = await import("../health-widget.js");
       initHealthWidget(ctx);
     }
-    resetWriteGateState(process.cwd());
+    resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     approvalQuestionAbortInFlight = false;
     clearDeferredApprovalGate();
@@ -194,9 +199,9 @@ export function registerHooks(
     await applyCompactionThresholdOverride(ctx);
     // Skip MCP auto-prep when running inside an auto-worktree (see session_switch below).
     const { isInAutoWorktree } = await import("../auto-worktree.js");
-    if (!isInAutoWorktree(process.cwd())) {
+    if (!isInAutoWorktree(basePath)) {
       const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
-      prepareWorkflowMcpForProject(ctx, process.cwd());
+      prepareWorkflowMcpForProject(ctx, basePath);
     }
 
     // Apply show_token_cost preference (#1515)
@@ -234,12 +239,13 @@ export function registerHooks(
   });
 
   pi.on("session_switch", async (_event, ctx) => {
+    const basePath = contextBasePath(ctx);
     initSessionNotifications(ctx);
-    resetWriteGateState(process.cwd());
+    resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     clearDeferredApprovalGate();
     await resetAskUserQuestionsTurnCache();
-    clearDiscussionFlowState(process.cwd());
+    clearDiscussionFlowState(basePath);
     await syncServiceTierStatus(ctx);
     await applyDisabledModelProviderPolicy(ctx);
     await applyCompactionThresholdOverride(ctx);
@@ -248,9 +254,9 @@ export function registerHooks(
     // post-chdir rewrites the file mid-run (non-idempotent due to cwd-relative
     // CLI path resolution), dirtying the tree and breaking the milestone merge.
     const { isInAutoWorktree } = await import("../auto-worktree.js");
-    if (!isInAutoWorktree(process.cwd())) {
+    if (!isInAutoWorktree(basePath)) {
       const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
-      prepareWorkflowMcpForProject(ctx, process.cwd());
+      prepareWorkflowMcpForProject(ctx, basePath);
     }
     await loadToolApiKeysForSession();
     if (!isAutoActive()) {
@@ -266,7 +272,7 @@ export function registerHooks(
     const { getEcosystemReadyPromise } = await import("../ecosystem/loader.js");
     await getEcosystemReadyPromise();
 
-    const beforeAgentBasePath = process.cwd();
+    const beforeAgentBasePath = contextBasePath(ctx);
     const pendingApprovalGate = getPendingGate(beforeAgentBasePath);
     if (pendingApprovalGate && isExplicitApprovalResponse(event.prompt, pendingApprovalGate)) {
       markApprovalGateVerified(pendingApprovalGate, beforeAgentBasePath);
@@ -283,7 +289,7 @@ export function registerHooks(
     // Refresh the snapshot used by ecosystem getPhase()/getActiveUnit().
     // deriveState has its own ~100ms cache so this is cheap on repeat calls.
     try {
-      const state = await deriveGsdState(process.cwd());
+      const state = await deriveGsdState(beforeAgentBasePath);
       updateSnapshot(state);
     } catch {
       updateSnapshot(null);
@@ -328,7 +334,7 @@ export function registerHooks(
     try {
       await handleAgentEnd(pi, event, ctx);
     } finally {
-      activateDeferredApprovalGate(process.cwd());
+      activateDeferredApprovalGate(contextBasePath(ctx));
     }
   });
 
@@ -344,8 +350,8 @@ export function registerHooks(
     }
   });
 
-  pi.on("session_before_compact", async () => {
-    const basePath = process.cwd();
+  pi.on("session_before_compact", async (_event, ctx) => {
+    const basePath = contextBasePath(ctx);
     // Context Mode is default-on. Write the resumable snapshot before any
     // active-auto cancel return so auto sessions still leave re-entry context.
     await writeContextModeCompactionSnapshot(basePath);
@@ -412,7 +418,7 @@ export function registerHooks(
     if (!unitType) {
       try {
         const { getPendingDeepProjectSetupUnitForContext } = await import("../guided-flow.js");
-        const pending = getPendingDeepProjectSetupUnitForContext(ctx, process.cwd());
+        const pending = getPendingDeepProjectSetupUnitForContext(ctx, contextBasePath(ctx));
         unitType = pending?.unitType;
         unitId = pending?.unitId;
       } catch {
@@ -421,7 +427,7 @@ export function registerHooks(
     }
 
     if (!unitType) {
-      const milestoneId = await getDiscussionMilestoneIdFor(process.cwd());
+      const milestoneId = await getDiscussionMilestoneIdFor(contextBasePath(ctx));
       if (milestoneId) {
         unitType = "discuss-milestone";
         unitId = milestoneId;
@@ -431,7 +437,7 @@ export function registerHooks(
     if (!shouldPauseForUserApprovalQuestion(unitType, [event.message])) return;
 
     const gateId = approvalGateIdForUnit(unitType, unitId);
-    if (gateId) deferApprovalGate(gateId, process.cwd());
+    if (gateId) deferApprovalGate(gateId, contextBasePath(ctx));
 
     approvalQuestionAbortInFlight = true;
     ctx.ui.notify(
@@ -451,7 +457,7 @@ export function registerHooks(
     const { isParallelActive, shutdownParallel } = await import("../parallel-orchestrator.js");
     if (isParallelActive()) {
       try {
-        await shutdownParallel(process.cwd());
+        await shutdownParallel(contextBasePath(ctx));
       } catch {
         // best-effort
       }
@@ -463,8 +469,8 @@ export function registerHooks(
     }
   });
 
-  pi.on("tool_call", async (event) => {
-    const discussionBasePath = process.cwd();
+  pi.on("tool_call", async (event, ctx) => {
+    const discussionBasePath = contextBasePath(ctx);
     const toolName = canonicalToolName(event.toolName);
     // ── Loop guard: block repeated identical tool calls ──
     const loopCheck = checkToolCallLoop(toolName, event.input as Record<string, unknown>);
@@ -648,7 +654,7 @@ export function registerHooks(
     }
   });
 
-  pi.on("tool_result", async (event) => {
+  pi.on("tool_result", async (event, ctx) => {
     if (isAutoActive() && typeof event.toolCallId === "string") {
       markToolEnd(event.toolCallId);
     }
@@ -667,7 +673,7 @@ export function registerHooks(
     }
     const toolName = canonicalToolName(event.toolName);
     if (toolName !== "ask_user_questions") return;
-    const basePath = process.cwd();
+    const basePath = contextBasePath(ctx);
     const milestoneId = await getDiscussionMilestoneIdFor(basePath);
     const queueActive = isQueuePhaseActive(basePath);
 

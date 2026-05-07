@@ -16,6 +16,7 @@ import {
 } from "../auto/resolve.js";
 import { runUnit } from "../auto/run-unit.js";
 import { autoLoop } from "../auto/loop.js";
+import { runDispatch } from "../auto/phases.js";
 import { detectStuck } from "../auto/detect-stuck.js";
 import type { UnitResult, AgentEndEvent } from "../auto/types.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
@@ -66,7 +67,7 @@ function makeMockSession(opts?: {
     verbose: false,
     basePath: process.cwd(),
     cmdCtx: {
-      newSession: (options?: { abortSignal?: AbortSignal }) => {
+      newSession: (options?: { abortSignal?: AbortSignal; workspaceRoot?: string }) => {
         opts?.onNewSessionStart?.(session);
         if (opts?.newSessionThrows) {
           return Promise.reject(new Error(opts.newSessionThrows));
@@ -78,7 +79,7 @@ function makeMockSession(opts?: {
             setTimeout(() => {
               // Simulate AgentSession.newSession() checking abortSignal after
               // its internal async work (abort()) completes — this is where the
-              // real code captures process.cwd() and rebuilds the tool runtime.
+              // real code selects a workspace root and rebuilds the tool runtime.
               // If the signal is aborted, the real code discards the session.
               opts?.onSignalCheck?.(options?.abortSignal?.aborted ?? false);
               opts?.onNewSessionSettle?.(session);
@@ -548,10 +549,9 @@ test("runUnit proceeds when isProviderRequestReady throws (defensive) (#4555)", 
   assert.equal(pi.calls.length, 0);
 });
 
-test("late-resolving newSession() after timeout receives aborted signal so tool runtime is not configured with root cwd (#3731)", async () => {
-  // When newSession() times out in runUnit(), auto-mode restores cwd to project
-  // root. If newSession() later resolves, it must NOT use process.cwd() to
-  // configure the tool runtime (which would give it root cwd, not worktree cwd).
+test("late-resolving newSession() after timeout receives aborted signal so tool runtime is not configured with stale workspace root (#3731)", async () => {
+  // When newSession() times out in runUnit(), a late resolution must not
+  // configure the tool runtime against a stale workspace root.
   //
   // The fix: runUnit creates an AbortController, aborts it on timeout, and passes
   // the signal to newSession(). AgentSession.newSession() checks the signal after
@@ -566,8 +566,8 @@ test("late-resolving newSession() after timeout receives aborted signal so tool 
 
     // newSession mock simulates AgentSession.newSession() behavior:
     // after an internal delay (representing await this.abort()), it checks the
-    // abortSignal — that's where the real code would capture process.cwd() and
-    // call _buildRuntime. If aborted, the real code must discard the session.
+    // abortSignal before selecting the workspace root and calling _buildRuntime.
+    // If aborted, the real code must discard the session.
     const s = makeMockSession({
       newSessionDelayMs: 200_000, // longer than NEW_SESSION_TIMEOUT_MS (120s)
       onSignalCheck: (aborted) => {
@@ -600,7 +600,7 @@ test("late-resolving newSession() after timeout receives aborted signal so tool 
       abortedWhenLateSessionSettled,
       true,
       "runUnit must pass an aborted AbortSignal to newSession() when it resolves after the session-creation timeout (#3731). " +
-      "Without this, AgentSession.newSession() captures root process.cwd() and rebuilds the tool runtime with wrong cwd.",
+      "Without this, AgentSession.newSession() can rebuild the tool runtime with a stale workspace root.",
     );
   } finally {
     mock.timers.reset();
@@ -2720,6 +2720,199 @@ test("autoLoop stops when worktree has no .git for execute-task (#1833)", async 
   assert.ok(
     healthNotification,
     "should notify about missing .git in worktree",
+  );
+});
+
+test("dispatch health check wins before stuck detection for execute-task without .git", async () => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  const pi = makeMockPi();
+  const notifications: string[] = [];
+  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
+
+  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
+  const deps = makeMockDeps({
+    existsSync: (p: string) => !p.endsWith(".git"),
+  });
+  const result = await runDispatch(
+    {
+      ctx,
+      pi,
+      s,
+      deps,
+      prefs: undefined,
+      iteration: 1,
+      flowId: "test-flow",
+      nextSeq: () => 1,
+    },
+    {
+      state: {
+        phase: "executing",
+        activeMilestone: { id: "M001", title: "Test", status: "active" },
+        activeSlice: { id: "S01", title: "Slice 1" },
+        activeTask: { id: "T01" },
+        registry: [{ id: "M001", status: "active" }],
+        blockers: [],
+      } as any,
+      mid: "M001",
+      midTitle: "Test",
+    },
+    {
+      recentUnits: [
+        { key: "execute-task/M001/S01/T01" },
+        { key: "execute-task/M001/S01/T01" },
+      ],
+      stuckRecoveryAttempts: 1,
+      consecutiveFinalizeTimeouts: 0,
+    },
+  );
+
+  assert.equal(result.action, "break");
+  assert.equal(result.reason, "worktree-invalid");
+  assert.ok(deps.callLog.includes("stopAuto"), "should stop through worktree health check");
+  assert.ok(
+    notifications.some((n) => n.includes("Worktree health check failed") && n.includes("no .git")),
+    "should notify about missing .git",
+  );
+  assert.ok(
+    !notifications.some((n) => n.includes("Stuck on execute-task")),
+    "stuck-loop message must not mask the worktree health failure",
+  );
+});
+
+test("pre-dispatch skip resolves before dispatch health and stuck accounting", async () => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  const pi = makeMockPi();
+  const notifications: string[] = [];
+  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
+
+  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
+  const deps = makeMockDeps({
+    existsSync: (p: string) => !p.endsWith(".git"),
+    runPreDispatchHooks: () => ({ firedHooks: ["skip-execute"], action: "skip" }),
+  });
+  const loopState = {
+    recentUnits: [
+      { key: "execute-task/M001/S01/T01" },
+      { key: "execute-task/M001/S01/T01" },
+    ],
+    stuckRecoveryAttempts: 1,
+    consecutiveFinalizeTimeouts: 0,
+  };
+
+  const result = await runDispatch(
+    {
+      ctx,
+      pi,
+      s,
+      deps,
+      prefs: undefined,
+      iteration: 1,
+      flowId: "test-flow",
+      nextSeq: () => 1,
+    },
+    {
+      state: {
+        phase: "executing",
+        activeMilestone: { id: "M001", title: "Test", status: "active" },
+        activeSlice: { id: "S01", title: "Slice 1" },
+        activeTask: { id: "T01" },
+        registry: [{ id: "M001", status: "active" }],
+        blockers: [],
+      } as any,
+      mid: "M001",
+      midTitle: "Test",
+    },
+    loopState,
+  );
+
+  assert.equal(result.action, "continue");
+  assert.ok(!deps.callLog.includes("stopAuto"), "skip hook should not stop on worktree health");
+  assert.equal(loopState.recentUnits.length, 2, "skip hook should not update stuck accounting");
+  assert.ok(
+    notifications.some((n) => n.includes("Skipping execute-task M001/S01/T01")),
+    "should notify about the skip hook",
+  );
+  assert.ok(
+    !notifications.some((n) => n.includes("Worktree health check failed") || n.includes("Stuck on execute-task")),
+    "health and stuck notifications must not run before skip hook resolution",
+  );
+});
+
+test("pre-dispatch replace resolves final unit before dispatch health and stuck accounting", async () => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  const pi = makeMockPi();
+  const notifications: string[] = [];
+  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
+
+  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
+  const deps = makeMockDeps({
+    existsSync: (p: string) => !p.endsWith(".git"),
+    runPreDispatchHooks: () => ({
+      firedHooks: ["review"],
+      action: "replace",
+      unitType: "hook/review",
+      prompt: "review before executing",
+      model: "review-model",
+    }),
+  });
+  const loopState = {
+    recentUnits: [
+      { key: "execute-task/M001/S01/T01" },
+      { key: "execute-task/M001/S01/T01" },
+    ],
+    stuckRecoveryAttempts: 1,
+    consecutiveFinalizeTimeouts: 0,
+  };
+
+  const result = await runDispatch(
+    {
+      ctx,
+      pi,
+      s,
+      deps,
+      prefs: undefined,
+      iteration: 1,
+      flowId: "test-flow",
+      nextSeq: () => 1,
+    },
+    {
+      state: {
+        phase: "executing",
+        activeMilestone: { id: "M001", title: "Test", status: "active" },
+        activeSlice: { id: "S01", title: "Slice 1" },
+        activeTask: { id: "T01" },
+        registry: [{ id: "M001", status: "active" }],
+        blockers: [],
+      } as any,
+      mid: "M001",
+      midTitle: "Test",
+    },
+    loopState,
+  );
+
+  assert.equal(result.action, "next");
+  assert.equal(result.data?.unitType, "hook/review");
+  assert.equal(result.data?.finalPrompt, "review before executing");
+  assert.equal(result.data?.hookModelOverride, "review-model");
+  assert.ok(!deps.callLog.includes("stopAuto"), "replace hook should not stop on execute-task health");
+  assert.deepEqual(
+    loopState.recentUnits.map((u) => u.key),
+    [
+      "execute-task/M001/S01/T01",
+      "execute-task/M001/S01/T01",
+      "hook/review/M001/S01/T01",
+    ],
+    "stuck accounting should record the final replaced unit",
+  );
+  assert.ok(
+    !notifications.some((n) => n.includes("Worktree health check failed") || n.includes("Stuck on execute-task")),
+    "health and stuck notifications must use the final replaced unit",
   );
 });
 

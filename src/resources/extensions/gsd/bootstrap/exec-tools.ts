@@ -6,6 +6,13 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
+function toolWorkspaceRoot(ctx: unknown): string {
+  if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
+    return (ctx as { cwd: string }).cwd;
+  }
+  return process.cwd();
+}
+
 async function loadContextModePreferences(baseDir: string) {
   const [{ loadEffectiveGSDPreferences }, { logWarning }] = await Promise.all([
     import("../preferences.js"),
@@ -54,7 +61,7 @@ export function registerExecTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeGsdExec } = await import("../tools/exec-tool.js");
-      const baseDir = process.cwd();
+      const baseDir = toolWorkspaceRoot(_ctx);
       return executeGsdExec(params as Parameters<typeof executeGsdExec>[0], {
         baseDir,
         preferences: await loadContextModePreferences(baseDir),
@@ -85,7 +92,7 @@ export function registerExecTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeExecSearch } = await import("../tools/exec-search-tool.js");
-      const baseDir = process.cwd();
+      const baseDir = toolWorkspaceRoot(_ctx);
       return executeExecSearch(params as Parameters<typeof executeExecSearch>[0], {
         baseDir,
         preferences: await loadContextModePreferences(baseDir),
@@ -108,7 +115,7 @@ export function registerExecTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeResume } = await import("../tools/resume-tool.js");
-      const baseDir = process.cwd();
+      const baseDir = toolWorkspaceRoot(_ctx);
       return executeResume(params as Parameters<typeof executeResume>[0], {
         baseDir,
         preferences: await loadContextModePreferences(baseDir),

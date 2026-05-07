@@ -8,6 +8,13 @@ import { DEFAULT_BASH_TIMEOUT_SECS } from "../constants.js";
 import { setLogBasePath, logWarning } from "../workflow-logger.js";
 import { resolveGsdPathContract } from "../paths.js";
 
+function resolveToolWorkspaceRoot(ctx?: unknown): string {
+  if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
+    return (ctx as { cwd: string }).cwd;
+  }
+  return process.cwd();
+}
+
 /**
  * Resolve the correct DB path for the current working directory.
  * If `basePath` is inside a `.gsd/worktrees/<MID>/` directory, returns
@@ -51,7 +58,7 @@ export async function ensureDbOpen(basePath: string = process.cwd()): Promise<bo
 
 export function registerDynamicTools(pi: ExtensionAPI): void {
   const baseBash = createBashTool(process.cwd(), {
-    spawnHook: (ctx) => ({ ...ctx, cwd: process.cwd() }),
+    spawnHook: (ctx) => ctx,
   });
   const dynamicBash = {
     ...baseBash,
@@ -62,11 +69,15 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
       onUpdate?: unknown,
       ctx?: unknown,
     ) => {
+      const basePath = resolveToolWorkspaceRoot(ctx);
+      const fresh = createBashTool(basePath, {
+        spawnHook: (spawnCtx) => ({ ...spawnCtx, cwd: basePath }),
+      });
       const paramsWithTimeout = {
         ...params,
         timeout: params.timeout ?? DEFAULT_BASH_TIMEOUT_SECS,
       };
-      return (baseBash as any).execute(toolCallId, paramsWithTimeout, signal, onUpdate, ctx);
+      return (fresh as any).execute(toolCallId, paramsWithTimeout, signal, onUpdate, ctx);
     },
   };
   pi.registerTool(dynamicBash as any);
@@ -81,7 +92,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
       onUpdate?: unknown,
       ctx?: unknown,
     ) => {
-      const fresh = createWriteTool(process.cwd());
+      const fresh = createWriteTool(resolveToolWorkspaceRoot(ctx));
       return (fresh as any).execute(toolCallId, params, signal, onUpdate, ctx);
     },
   } as any);
@@ -96,7 +107,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
       onUpdate?: unknown,
       ctx?: unknown,
     ) => {
-      const fresh = createReadTool(process.cwd());
+      const fresh = createReadTool(resolveToolWorkspaceRoot(ctx));
       return (fresh as any).execute(toolCallId, params, signal, onUpdate, ctx);
     },
   } as any);
@@ -111,7 +122,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
       onUpdate?: unknown,
       ctx?: unknown,
     ) => {
-      const fresh = createEditTool(process.cwd());
+      const fresh = createEditTool(resolveToolWorkspaceRoot(ctx));
       return (fresh as any).execute(toolCallId, params, signal, onUpdate, ctx);
     },
   } as any);

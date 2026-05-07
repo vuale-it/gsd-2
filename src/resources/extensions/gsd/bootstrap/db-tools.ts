@@ -16,6 +16,13 @@ async function loadWorkflowExecutors(): Promise<typeof import("../tools/workflow
   return import("../tools/workflow-tool-executors.js");
 }
 
+function toolWorkspaceRoot(ctx: unknown): string {
+  if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
+    return (ctx as { cwd: string }).cwd;
+  }
+  return process.cwd();
+}
+
 /**
  * Register an alias tool that shares the same execute function as its canonical counterpart.
  * The alias description and promptGuidelines direct the LLM to prefer the canonical name.
@@ -38,8 +45,8 @@ function registerAlias(pi: ExtensionAPI, toolDef: any, aliasName: string, canoni
   });
 }
 
-function requirementRootWriteGuard(operation: string): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError: true } | null {
-  const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(process.cwd()), "REQUIREMENTS");
+function requirementRootWriteGuard(operation: string, basePath: string): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError: true } | null {
+  const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), "REQUIREMENTS");
   if (!guard.block) return null;
   return {
     content: [{ type: "text", text: `Error ${operation} requirement: ${guard.reason ?? "requirements write blocked"}` }],
@@ -65,7 +72,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_decision_save (formerly gsd_save_decision) ─────────────────────
 
   const decisionSaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot save decision." }],
@@ -84,7 +92,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
           when_context: params.when_context,
           made_by: params.made_by,
         },
-        process.cwd(),
+        basePath,
       );
       return {
         content: [{ type: "text" as const, text: `Saved decision ${id}` }],
@@ -152,9 +160,10 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_requirement_update (formerly gsd_update_requirement) ───────────
 
   const requirementUpdateExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const gateBlock = requirementRootWriteGuard("update_requirement");
+    const basePath = toolWorkspaceRoot(_ctx);
+    const gateBlock = requirementRootWriteGuard("update_requirement", basePath);
     if (gateBlock) return gateBlock;
-    const dbAvailable = await ensureDbOpen();
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot update requirement." }],
@@ -170,7 +179,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
       if (params.description !== undefined) updates.description = params.description;
       if (params.primary_owner !== undefined) updates.primary_owner = params.primary_owner;
       if (params.supporting_slices !== undefined) updates.supporting_slices = params.supporting_slices;
-      await updateRequirementInDb(params.id, updates, process.cwd());
+      await updateRequirementInDb(params.id, updates, basePath);
       return {
         content: [{ type: "text" as const, text: `Updated requirement ${params.id}` }],
         details: { operation: "update_requirement", id: params.id } as any,
@@ -232,9 +241,10 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_requirement_save ─────────────────────────────────────────────
 
   const requirementSaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const gateBlock = requirementRootWriteGuard("save_requirement");
+    const basePath = toolWorkspaceRoot(_ctx);
+    const gateBlock = requirementRootWriteGuard("save_requirement", basePath);
     if (gateBlock) return gateBlock;
-    const dbAvailable = await ensureDbOpen();
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot save requirement." }],
@@ -255,7 +265,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
           validation: params.validation,
           notes: params.notes,
         },
-        process.cwd(),
+        basePath,
       );
       return {
         content: [{ type: "text" as const, text: `Saved requirement ${result.id}` }],
@@ -335,7 +345,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const summarySaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSummarySave } = await loadWorkflowExecutors();
-    return executeSummarySave(params, process.cwd());
+    return executeSummarySave(params, toolWorkspaceRoot(_ctx));
   };
 
   const summarySaveTool = {
@@ -386,24 +396,24 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneGenerateIdExecute = async (_toolCallId: string, _params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     try {
+      const basePath = toolWorkspaceRoot(_ctx);
       // Claim a reserved ID if the guided-flow already previewed one to the user.
       // This guarantees the ID shown in the UI matches the one materialised on disk.
       const { claimReservedId, findMilestoneIds, getReservedMilestoneIds, nextMilestoneId } = await import("../guided-flow.js");
       const reserved = claimReservedId();
       if (reserved) {
-        await ensureMilestoneDbRow(reserved);
+        await ensureMilestoneDbRow(reserved, basePath);
         return {
           content: [{ type: "text" as const, text: reserved }],
           details: { operation: "generate_milestone_id", id: reserved, source: "reserved" } as any,
         };
       }
 
-      const basePath = process.cwd();
       const existingIds = findMilestoneIds(basePath);
       const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
       const allIds = [...new Set([...existingIds, ...getReservedMilestoneIds()])];
       const newId = nextMilestoneId(allIds, uniqueEnabled);
-      await ensureMilestoneDbRow(newId);
+      await ensureMilestoneDbRow(newId, basePath);
       return {
         content: [{ type: "text" as const, text: newId }],
         details: { operation: "generate_milestone_id", id: newId, existingCount: existingIds.length, uniqueEnabled } as any,
@@ -423,8 +433,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
    * later writes the full row. Silently skips if the DB isn't available yet
    * (pre-migration).
    */
-  async function ensureMilestoneDbRow(milestoneId: string): Promise<void> {
-    const dbAvailable = await ensureDbOpen();
+  async function ensureMilestoneDbRow(milestoneId: string, basePath: string): Promise<void> {
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) return;
     try {
       const { insertMilestone } = await import("../gsd-db.js");
@@ -471,7 +481,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const planMilestoneExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executePlanMilestone } = await loadWorkflowExecutors();
-    return executePlanMilestone(params, process.cwd());
+    return executePlanMilestone(params, toolWorkspaceRoot(_ctx));
   };
 
   const planMilestoneTool = {
@@ -541,7 +551,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const planSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executePlanSlice } = await loadWorkflowExecutors();
-    return executePlanSlice(params, process.cwd());
+    return executePlanSlice(params, toolWorkspaceRoot(_ctx));
   };
 
   const planSliceTool = {
@@ -590,7 +600,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_plan_task (gsd_task_plan alias) ───────────────────────────────
 
   const planTaskExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot plan task." }],
@@ -599,7 +610,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
     }
     try {
       const { handlePlanTask } = await import("../tools/plan-task.js");
-      const result = await handlePlanTask(params, process.cwd());
+      const result = await handlePlanTask(params, basePath);
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error planning task: ${result.error}` }],
@@ -664,7 +675,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const taskCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeTaskComplete } = await loadWorkflowExecutors();
-    return executeTaskComplete(params, process.cwd());
+    return executeTaskComplete(params, toolWorkspaceRoot(_ctx));
   };
 
   const taskCompleteTool = {
@@ -735,7 +746,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const sliceCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSliceComplete } = await loadWorkflowExecutors();
-    return executeSliceComplete(params, process.cwd());
+    return executeSliceComplete(params, toolWorkspaceRoot(_ctx));
   };
 
   const sliceCompleteTool = {
@@ -835,7 +846,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_skip_slice (#3477 / #3487) ───────────────────────────────────
 
   const skipSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot skip slice." }],
@@ -868,7 +880,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
       // Rebuild STATE.md so it reflects the skip immediately (#3477).
       // Without this, /gsd auto reads stale STATE.md and resumes the skipped slice.
       try {
-        const basePath = process.cwd();
         const { rebuildState } = await import("../doctor.js");
         await rebuildState(basePath);
       } catch (err) {
@@ -928,7 +939,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeCompleteMilestone } = await loadWorkflowExecutors();
-    return executeCompleteMilestone(params, process.cwd());
+    return executeCompleteMilestone(params, toolWorkspaceRoot(_ctx));
   };
 
   const milestoneCompleteTool = {
@@ -974,7 +985,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneValidateExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeValidateMilestone } = await loadWorkflowExecutors();
-    return executeValidateMilestone(params, process.cwd());
+    return executeValidateMilestone(params, toolWorkspaceRoot(_ctx));
   };
 
   const milestoneValidateTool = {
@@ -1012,7 +1023,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const replanSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeReplanSlice } = await loadWorkflowExecutors();
-    return executeReplanSlice(params, process.cwd());
+    return executeReplanSlice(params, toolWorkspaceRoot(_ctx));
   };
 
   const replanSliceTool = {
@@ -1063,7 +1074,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const reassessRoadmapExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeReassessRoadmap } = await loadWorkflowExecutors();
-    return executeReassessRoadmap(params, process.cwd());
+    return executeReassessRoadmap(params, toolWorkspaceRoot(_ctx));
   };
 
   const reassessRoadmapTool = {
@@ -1122,7 +1133,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // Single-writer v3, Stream 3: reversibility tools for closed units.
 
   const reopenTaskExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot reopen task." }],
@@ -1131,7 +1143,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
     }
     try {
       const { handleReopenTask } = await import("../tools/reopen-task.js");
-      const result = await handleReopenTask(params, process.cwd());
+      const result = await handleReopenTask(params, basePath);
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error reopening task: ${result.error}` }],
@@ -1188,7 +1200,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_slice_reopen (gsd_reopen_slice alias) ─────────────────────────
 
   const reopenSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot reopen slice." }],
@@ -1197,7 +1210,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
     }
     try {
       const { handleReopenSlice } = await import("../tools/reopen-slice.js");
-      const result = await handleReopenSlice(params, process.cwd());
+      const result = await handleReopenSlice(params, basePath);
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error reopening slice: ${result.error}` }],
@@ -1254,7 +1267,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_milestone_reopen (gsd_reopen_milestone alias) ─────────────────
 
   const reopenMilestoneExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const dbAvailable = await ensureDbOpen();
+    const basePath = toolWorkspaceRoot(_ctx);
+    const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
         content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot reopen milestone." }],
@@ -1263,7 +1277,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
     }
     try {
       const { handleReopenMilestone } = await import("../tools/reopen-milestone.js");
-      const result = await handleReopenMilestone(params, process.cwd());
+      const result = await handleReopenMilestone(params, basePath);
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error reopening milestone: ${result.error}` }],
@@ -1319,7 +1333,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const saveGateResultExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSaveGateResult } = await loadWorkflowExecutors();
-    return executeSaveGateResult(params, process.cwd());
+    return executeSaveGateResult(params, toolWorkspaceRoot(_ctx));
   };
 
   const saveGateResultTool = {

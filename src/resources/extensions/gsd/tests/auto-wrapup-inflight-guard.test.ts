@@ -110,7 +110,7 @@ describe("#3512: gsd-auto-wrapup must not interrupt in-flight tool calls", () =>
   });
 });
 
-describe("hook dispatch session cwd", () => {
+describe("hook dispatch session workspace root", () => {
   test("dispatchHookUnit passes basePath explicitly to newSession", async (t) => {
     const originalCwd = process.cwd();
     const basePath = mkdtempSync(join(tmpdir(), "gsd-hook-cwd-"));
@@ -161,14 +161,14 @@ describe("hook dispatch session cwd", () => {
     );
 
     assert.equal(dispatched, true);
-    assert.deepEqual(newSessionOptions, { cwd: basePath });
+    assert.deepEqual(newSessionOptions, { workspaceRoot: basePath });
   });
 });
 
 describe("#4276: pending/skipped tools stay visible to auto-mode hooks", () => {
   test("tool_call handler marks GSD tools in-flight before execution_start", () => {
     const startMarker = 'pi.on("tool_call", async (event, ctx) => {';
-    const endMarker = 'pi.on("tool_result", async (event) => {';
+    const endMarker = 'pi.on("tool_result", async (event, ctx) => {';
     const toolCallSection = registerHooksSrc.slice(
       registerHooksSrc.indexOf(startMarker),
       registerHooksSrc.indexOf(endMarker),
@@ -182,7 +182,7 @@ describe("#4276: pending/skipped tools stay visible to auto-mode hooks", () => {
   });
 
   test("tool_result handler clears pending tools and records queued-skip errors", () => {
-    const startMarker = 'pi.on("tool_result", async (event) => {';
+    const startMarker = 'pi.on("tool_result", async (event, ctx) => {';
     const endMarker = 'pi.on("tool_execution_start", async (event) => {';
     const toolResultSection = registerHooksSrc.slice(
       registerHooksSrc.indexOf(startMarker),

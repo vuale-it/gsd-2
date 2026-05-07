@@ -48,46 +48,21 @@ export async function runUnit(
 ): Promise<UnitResult> {
   debugLog("runUnit", { phase: "start", unitType, unitId });
 
-  // Ensure cwd matches basePath BEFORE newSession() captures it. The new
-  // session reads process.cwd() during construction to anchor its tool
-  // runtime and system prompt; if cwd has drifted (async_bash, background
-  // jobs, prior unit cleanup), the session would otherwise be rooted to
-  // the wrong directory. Must be synchronous — no awaits between chdir
-  // and newSession (#1389, #4762 follow-up).
-  try {
-    if (process.cwd() !== s.basePath) {
-      process.chdir(s.basePath);
-    }
-  } catch (e) {
-    const msg = `Failed to chdir to basePath before newSession (basePath: ${s.basePath}): ${String(e)}`;
-    logWarning("engine", msg, { basePath: s.basePath, error: String(e) });
-    return {
-      status: "cancelled",
-      errorContext: {
-        message: msg,
-        category: "session-failed",
-        isTransient: true,
-      },
-    };
-  }
-
   // ── Session creation with timeout ──
   debugLog("runUnit", { phase: "session-create", unitType, unitId });
 
   let sessionResult: { cancelled: boolean };
   let sessionTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const mySessionSwitchGeneration = ++sessionSwitchGeneration;
-  // #3731: Cancellation controller for newSession(). When the session-creation
-  // timeout fires, we abort this controller so that the still-in-flight
-  // newSession() discards itself after await this.abort() completes, preventing
-  // it from capturing the (now-root) process.cwd() and rebuilding the tool
-  // runtime with the wrong cwd.
+  // #3731: Cancellation controller for newSession(). When session creation
+  // times out, abort before a late session switch can rebuild the tool runtime
+  // against a stale workspace root.
   const sessionAbortController = new AbortController();
   _setSessionSwitchInFlight(true);
   try {
     const sessionPromise = s.cmdCtx!.newSession({
       abortSignal: sessionAbortController.signal,
-      cwd: s.basePath,
+      workspaceRoot: s.basePath,
     }).finally(() => {
       if (sessionSwitchGeneration === mySessionSwitchGeneration) {
         _setSessionSwitchInFlight(false);

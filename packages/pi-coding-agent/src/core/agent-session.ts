@@ -1645,8 +1645,8 @@ export class AgentSession {
 	async newSession(options?: {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
-		/** Explicit working directory for the new session/tool runtime. */
-		cwd?: string;
+		/** Explicit workspace root for the new session/tool runtime. */
+		workspaceRoot?: string;
 		/** See ExtensionCommandContext.newSession for docs (#3731). */
 		abortSignal?: AbortSignal;
 	}): Promise<boolean> {
@@ -1668,10 +1668,10 @@ export class AgentSession {
 		try {
 			await this._settleCurrentTurnForSessionTransition();
 
-			// #3731: If the caller aborted (e.g. runUnit() timed out and restored cwd to
-			// project root), discard this session before capturing process.cwd() and
-			// rebuilding the tool runtime. Without this check, the late newSession()
-			// would rebuild tools with root cwd, breaking worktree isolation.
+			// #3731: If the caller aborted (e.g. runUnit() timed out while the
+			// worktree was being torn down), discard this session before rebuilding
+			// the tool runtime. Without this check, the late newSession() could
+			// rebuild tools with a stale workspace root.
 			if (options?.abortSignal?.aborted) {
 				return false;
 			}
@@ -1681,11 +1681,12 @@ export class AgentSession {
 		} finally {
 			this._sessionSwitchPending = false;
 		}
-		// Update cwd for the new tool runtime. Auto-mode passes an explicit cwd
-		// so session routing does not depend on global process.cwd() after
-		// worktree merge/teardown. Other callers keep the historical behavior.
+		// Update the workspace root for the new tool runtime. Auto-mode passes
+		// this explicitly so session routing does not depend on global
+		// process.cwd() after worktree merge/teardown. Other callers keep the
+		// historical default.
 		const previousCwd = this._cwd;
-		this._cwd = options?.cwd ?? process.cwd();
+		this._cwd = options?.workspaceRoot ?? process.cwd();
 		this.sessionManager.newSession({ parentSession: options?.parentSession });
 		this.agent.sessionId = this.sessionManager.getSessionId();
 		this._steeringMessages = [];

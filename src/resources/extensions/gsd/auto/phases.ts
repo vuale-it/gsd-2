@@ -1083,6 +1083,65 @@ export async function runDispatch(
   let prompt = dispatchResult.prompt;
   const pauseAfterUatDispatch = dispatchResult.pauseAfterDispatch ?? false;
 
+  // Resolve hooks and prior-slice gating before health/stuck accounting so
+  // those checks run against the final dispatch unit.
+  const preDispatchResult = deps.runPreDispatchHooks(
+    unitType,
+    unitId,
+    prompt,
+    s.basePath,
+  );
+  if (preDispatchResult.firedHooks.length > 0) {
+    ctx.ui.notify(
+      `Pre-dispatch hook${preDispatchResult.firedHooks.length > 1 ? "s" : ""}: ${preDispatchResult.firedHooks.join(", ")}`,
+      "info",
+    );
+    deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "pre-dispatch-hook", data: { firedHooks: preDispatchResult.firedHooks, action: preDispatchResult.action } });
+  }
+  if (preDispatchResult.action === "skip") {
+    ctx.ui.notify(
+      `Skipping ${unitType} ${unitId} (pre-dispatch hook).`,
+      "info",
+    );
+    await new Promise((r) => setImmediate(r));
+    return { action: "continue" };
+  }
+  if (preDispatchResult.action === "replace") {
+    prompt = preDispatchResult.prompt ?? prompt;
+    if (preDispatchResult.unitType) unitType = preDispatchResult.unitType;
+  } else if (preDispatchResult.prompt) {
+    prompt = preDispatchResult.prompt;
+  }
+
+  const guardBasePath = _resolveDispatchGuardBasePath(s);
+  const priorSliceBlocker = deps.getPriorSliceCompletionBlocker(
+    guardBasePath,
+    deps.getMainBranch(guardBasePath),
+    unitType,
+    unitId,
+  );
+  if (priorSliceBlocker) {
+    await deps.stopAuto(ctx, pi, priorSliceBlocker);
+    debugLog("autoLoop", { phase: "exit", reason: "prior-slice-blocker" });
+    return { action: "break", reason: "prior-slice-blocker" };
+  }
+
+  // Execute-task needs a real writable checkout. The same health check also
+  // exists in runUnitPhase, but the stuck-window detector runs before that
+  // phase. Check here too so repeated derivations of a broken worktree stop
+  // with the actionable worktree error instead of the generic stuck-loop error.
+  if (s.basePath && unitType === "execute-task") {
+    const gitMarker = join(s.basePath, ".git");
+    const hasGit = deps.existsSync(gitMarker);
+    if (!hasGit) {
+      const msg = `Worktree health check failed: ${s.basePath} has no .git — refusing to dispatch ${unitType} ${unitId}`;
+      debugLog("autoLoop", { phase: "dispatch-worktree-health-fail", basePath: s.basePath, hasGit });
+      ctx.ui.notify(msg, "error");
+      await deps.stopAuto(ctx, pi, msg);
+      return { action: "break", reason: "worktree-invalid" };
+    }
+  }
+
   // ── Sliding-window stuck detection with graduated recovery ──
   const derivedKey = `${unitType}/${unitId}`;
 
@@ -1222,48 +1281,6 @@ export async function runDispatch(
         loopState.stuckRecoveryAttempts = 0;
       }
     }
-  }
-
-  // Pre-dispatch hooks
-  const preDispatchResult = deps.runPreDispatchHooks(
-    unitType,
-    unitId,
-    prompt,
-    s.basePath,
-  );
-  if (preDispatchResult.firedHooks.length > 0) {
-    ctx.ui.notify(
-      `Pre-dispatch hook${preDispatchResult.firedHooks.length > 1 ? "s" : ""}: ${preDispatchResult.firedHooks.join(", ")}`,
-      "info",
-    );
-    deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "pre-dispatch-hook", data: { firedHooks: preDispatchResult.firedHooks, action: preDispatchResult.action } });
-  }
-  if (preDispatchResult.action === "skip") {
-    ctx.ui.notify(
-      `Skipping ${unitType} ${unitId} (pre-dispatch hook).`,
-      "info",
-    );
-    await new Promise((r) => setImmediate(r));
-    return { action: "continue" };
-  }
-  if (preDispatchResult.action === "replace") {
-    prompt = preDispatchResult.prompt ?? prompt;
-    if (preDispatchResult.unitType) unitType = preDispatchResult.unitType;
-  } else if (preDispatchResult.prompt) {
-    prompt = preDispatchResult.prompt;
-  }
-
-  const guardBasePath = _resolveDispatchGuardBasePath(s);
-  const priorSliceBlocker = deps.getPriorSliceCompletionBlocker(
-    guardBasePath,
-    deps.getMainBranch(guardBasePath),
-    unitType,
-    unitId,
-  );
-  if (priorSliceBlocker) {
-    await deps.stopAuto(ctx, pi, priorSliceBlocker);
-    debugLog("autoLoop", { phase: "exit", reason: "prior-slice-blocker" });
-    return { action: "break", reason: "prior-slice-blocker" };
   }
 
   return {

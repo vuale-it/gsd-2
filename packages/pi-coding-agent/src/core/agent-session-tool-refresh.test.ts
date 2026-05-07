@@ -131,9 +131,9 @@ describe("#3616 — newSession() restores narrowed tool set when cwd unchanged",
 		);
 	});
 
-	it("uses explicit cwd option instead of process.cwd() when rebuilding runtime", async () => {
+	it("uses explicit workspaceRoot option instead of process.cwd() when rebuilding runtime", async () => {
 		const session = await createSession();
-		const explicitCwd = mkdtempSync(join(testDir, "explicit-cwd-"));
+		const explicitWorkspaceRoot = mkdtempSync(join(testDir, "explicit-workspace-"));
 		(session as any)._cwd = process.cwd();
 
 		let buildRuntimeCalled = false;
@@ -143,9 +143,9 @@ describe("#3616 — newSession() restores narrowed tool set when cwd unchanged",
 			return originalBuild(options);
 		};
 
-		const ok = await session.newSession({ cwd: explicitCwd });
+		const ok = await session.newSession({ workspaceRoot: explicitWorkspaceRoot });
 		assert.equal(ok, true);
-		assert.equal((session as any)._cwd, explicitCwd);
-		assert.ok(buildRuntimeCalled, "explicit cwd differing from prior cwd must rebuild runtime");
+		assert.equal((session as any)._cwd, explicitWorkspaceRoot);
+		assert.ok(buildRuntimeCalled, "explicit workspace root differing from prior root must rebuild runtime");
 	});
 });
