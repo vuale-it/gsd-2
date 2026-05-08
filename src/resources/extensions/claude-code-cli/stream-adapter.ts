@@ -418,6 +418,11 @@ function makeErrorMessage(model: string, errorMsg: string): AssistantMessage {
 	};
 }
 
+export function isClaudeCodeAbortErrorMessage(message: string | undefined | null): boolean {
+	if (!message) return false;
+	return /\b(?:claude code process aborted by user|request aborted by user|process aborted by user)\b/i.test(message);
+}
+
 /**
  * Generator exhaustion without a terminal result means the SDK stream was
  * interrupted mid-turn. Surface it as an error so downstream recovery logic
@@ -1840,6 +1845,14 @@ async function pumpSdkMessages(
 		stream.push({ type: "error", reason: "error", error: fallback });
 	} catch (err) {
 		const errorMsg = err instanceof Error ? err.message : String(err);
+		if (options?.signal?.aborted || isClaudeCodeAbortErrorMessage(errorMsg)) {
+			stream.push({
+				type: "error",
+				reason: "aborted",
+				error: makeAbortedMessage(modelId, lastTextContent),
+			});
+			return;
+		}
 		stream.push({
 			type: "error",
 			reason: "error",

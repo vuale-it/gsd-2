@@ -69,6 +69,7 @@ export interface WelcomeScreenOptions {
   modelName?: string
   provider?: string
   remoteChannel?: string
+  width?: number
 }
 
 function getShortCwd(): string {
@@ -87,17 +88,14 @@ function rpad(s: string, w: number): string {
   return s + ' '.repeat(Math.max(0, w - visLen(s)))
 }
 
-export function printWelcomeScreen(opts: WelcomeScreenOptions): void {
-  if (!process.stderr.isTTY) return
-
+export function buildWelcomeScreenLines(opts: WelcomeScreenOptions): string[] {
   const { version, remoteChannel } = opts
   const shortCwd = getShortCwd()
-  const termWidth = (process.stderr.columns || 80) - 1
+  const termWidth = Math.max(1, (opts.width ?? process.stderr.columns ?? 80) - 1)
 
   // Narrow terminal fallback
   if (termWidth < 70) {
-    process.stderr.write(`\n  Get Shit Done v${version}\n  ${shortCwd}\n\n`)
-    return
+    return ['', `  Get Shit Done v${version}`, `  ${shortCwd}`, '']
   }
 
   // ── Panel widths ────────────────────────────────────────────────────────────
@@ -196,5 +194,10 @@ export function printWelcomeScreen(opts: WelcomeScreenOptions): void {
   out.push(chalk.cyan(H.repeat(termWidth)))
   out.push('')
 
-  process.stderr.write(out.join('\n') + '\n')
+  return out
+}
+
+export function printWelcomeScreen(opts: WelcomeScreenOptions): void {
+  if (!process.stderr.isTTY) return
+  process.stderr.write(buildWelcomeScreenLines(opts).join('\n') + '\n')
 }

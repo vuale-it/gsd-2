@@ -4,7 +4,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { _handleSessionSwitchAgentEnd } from "../bootstrap/agent-end-recovery.js";
+import {
+  _handleSessionSwitchAgentEnd,
+  isClaudeCodeSessionSwitchAbortMessage,
+} from "../bootstrap/agent-end-recovery.js";
 import type { ErrorContext } from "../auto/types.js";
 
 test("user-abort message during session-switch is dropped (not propagated as cancellation)", () => {
@@ -54,6 +57,48 @@ test("genuine stopReason='aborted' with errorMessage during session-switch still
     category: "aborted",
     isTransient: true,
   });
+});
+
+test("Claude Code stream-aborted placeholder during session-switch is dropped", () => {
+  let cancelledWith: unknown = null;
+  const resolveCancelled = (ctx: ErrorContext) => {
+    cancelledWith = ctx;
+    return true;
+  };
+
+  _handleSessionSwitchAgentEnd(
+    {
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Claude Code stream aborted by caller" }],
+    },
+    resolveCancelled,
+  );
+
+  assert.equal(cancelledWith, null);
+});
+
+test("Claude Code session-switch abort detection is narrow", () => {
+  assert.equal(
+    isClaudeCodeSessionSwitchAbortMessage({
+      stopReason: "error",
+      content: [{ type: "text", text: "Claude Code error: Claude Code process aborted by user" }],
+    }),
+    true,
+  );
+  assert.equal(
+    isClaudeCodeSessionSwitchAbortMessage({
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Claude Code stream aborted by caller" }],
+    }),
+    true,
+  );
+  assert.equal(
+    isClaudeCodeSessionSwitchAbortMessage({
+      stopReason: "aborted",
+      content: [{ type: "text", text: "partial output before network failure" }],
+    }),
+    false,
+  );
 });
 
 test("empty-content aborted during session-switch is silently ignored", () => {

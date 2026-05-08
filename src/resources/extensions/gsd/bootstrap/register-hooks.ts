@@ -1,7 +1,9 @@
 // Project/App: GSD-2
 // File Purpose: Registers GSD extension runtime hooks and token-saving tool policies.
 
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import { isToolCallEventType } from "@gsd/pi-coding-agent";
@@ -30,14 +32,71 @@ import { extractSubagentAgentClasses } from "./subagent-input.js";
 import { approvalGateIdForUnit, isExplicitApprovalResponse, shouldPauseForUserApprovalQuestion } from "../user-input-boundary.js";
 import { resolveSkillManifest } from "../skill-manifest.js";
 
-// Skip the welcome screen on the very first session_start — cli.ts already
-// printed it before the TUI launched. Only re-print on /clear (subsequent sessions).
-let isFirstSession = true;
 let approvalQuestionAbortInFlight = false;
 
 interface DeferredApprovalGate {
   gateId: string;
   basePath: string;
+}
+
+type WelcomeScreenModule = {
+  buildWelcomeScreenLines(opts: { version: string; remoteChannel?: string; width?: number }): string[];
+};
+
+async function loadWelcomeScreenModule(): Promise<WelcomeScreenModule | undefined> {
+  const candidates: string[] = [];
+  const gsdBinPath = process.env.GSD_BIN_PATH;
+  if (gsdBinPath) {
+    candidates.push(join(dirname(gsdBinPath), "welcome-screen.js"));
+  }
+
+  const packageRoot = process.env.GSD_PKG_ROOT;
+  if (packageRoot) {
+    candidates.push(join(packageRoot, "dist", "welcome-screen.js"));
+    candidates.push(join(packageRoot, "src", "welcome-screen.ts"));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const mod = await import(pathToFileURL(candidate).href) as Partial<WelcomeScreenModule>;
+      if (typeof mod.buildWelcomeScreenLines === "function") {
+        return mod as WelcomeScreenModule;
+      }
+    } catch {
+      // Try the next package layout.
+    }
+  }
+  return undefined;
+}
+
+async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
+  if (!ctx.hasUI || typeof ctx.ui?.setHeader !== "function") return;
+
+  try {
+    const welcome = await loadWelcomeScreenModule();
+    if (!welcome) return;
+
+    let remoteChannel: string | undefined;
+    try {
+      const { resolveRemoteConfig } = await import("../../remote-questions/config.js");
+      const rc = resolveRemoteConfig();
+      if (rc) remoteChannel = rc.channel;
+    } catch { /* non-fatal */ }
+
+    ctx.ui.setHeader(() => ({
+      render(width: number): string[] {
+        return welcome.buildWelcomeScreenLines({
+          version: process.env.GSD_VERSION || "0.0.0",
+          remoteChannel,
+          width,
+        });
+      },
+      invalidate(): void {},
+    }));
+  } catch {
+    /* non-fatal */
+  }
 }
 
 let deferredApprovalGate: DeferredApprovalGate | null = null;
@@ -382,28 +441,7 @@ export function registerHooks(
       const prefs = loadEffectiveGSDPreferences(basePath);
       process.env.GSD_SHOW_TOKEN_COST = prefs?.preferences.show_token_cost ? "1" : "";
     } catch { /* non-fatal */ }
-    if (isFirstSession) {
-      isFirstSession = false;
-    } else {
-      try {
-        const gsdBinPath = process.env.GSD_BIN_PATH;
-        if (gsdBinPath) {
-          const { dirname } = await import("node:path");
-          const { printWelcomeScreen } = await import(
-            join(dirname(gsdBinPath), "welcome-screen.js")
-          ) as { printWelcomeScreen: (opts: { version: string; modelName?: string; provider?: string; remoteChannel?: string }) => void };
-
-          let remoteChannel: string | undefined;
-          try {
-            const { resolveRemoteConfig } = await import("../../remote-questions/config.js");
-            const rc = resolveRemoteConfig();
-            if (rc) remoteChannel = rc.channel;
-          } catch { /* non-fatal */ }
-
-          printWelcomeScreen({ version: process.env.GSD_VERSION || "0.0.0", remoteChannel });
-        }
-      } catch { /* non-fatal */ }
-    }
+    await installWelcomeHeader(ctx);
     await loadToolApiKeysForSession();
     if (isAutoActive()) {
       ctx.ui.setWidget("gsd-health", undefined);

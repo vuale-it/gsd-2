@@ -14,6 +14,7 @@ import type { UnitResult } from "./types.js";
 import {
   _clearCurrentResolve,
   _consumePendingSwitchCancellation,
+  _markSessionSwitchAbortGraceWindow,
   _setCurrentResolve,
   _setSessionSwitchInFlight,
 } from "./resolve.js";
@@ -65,6 +66,7 @@ export async function runUnit(
       workspaceRoot: s.basePath,
     }).finally(() => {
       if (sessionSwitchGeneration === mySessionSwitchGeneration) {
+        _markSessionSwitchAbortGraceWindow();
         _setSessionSwitchInFlight(false);
       }
     });
@@ -128,6 +130,7 @@ export async function runUnit(
   // ── Create the agent_end promise (per-unit one-shot) ──
   // This happens after newSession completes so session-switch agent_end events
   // from the previous session cannot resolve the new unit.
+  _markSessionSwitchAbortGraceWindow();
   _setSessionSwitchInFlight(false);
   const unitPromise = new Promise<UnitResult>((resolve) => {
     _setCurrentResolve(resolve);

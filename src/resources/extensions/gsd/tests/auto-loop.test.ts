@@ -11,8 +11,11 @@ import {
   _hasPendingResolveForTest,
   _setActiveSession,
   _setSessionSwitchInFlight,
+  _markSessionSwitchAbortGraceWindow,
+  _clearSessionSwitchAbortGraceWindow,
   _consumePendingSwitchCancellation,
   isSessionSwitchInFlight,
+  isSessionSwitchAbortGraceActive,
 } from "../auto/resolve.js";
 import { runUnit } from "../auto/run-unit.js";
 import { autoLoop } from "../auto/loop.js";
@@ -2301,6 +2304,18 @@ test("resolveAgentEndCancelled queues cancellation that arrives during session s
   assert.equal(pending.errorContext.message, "Claude Code process aborted by user");
   assert.equal(_consumePendingSwitchCancellation(), null);
   _resetPendingResolve();
+});
+
+test("session-switch abort grace window is short-lived and resettable", () => {
+  _resetPendingResolve();
+
+  _markSessionSwitchAbortGraceWindow(1_000);
+
+  assert.equal(isSessionSwitchAbortGraceActive(Date.now()), true);
+  assert.equal(isSessionSwitchAbortGraceActive(Date.now() + 10_000), false);
+
+  _clearSessionSwitchAbortGraceWindow();
+  assert.equal(isSessionSwitchAbortGraceActive(), false);
 });
 
 // ─── #1571: artifact verification retry ──────────────────────────────────────

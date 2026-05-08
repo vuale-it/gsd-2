@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
 	makeStreamExhaustedErrorMessage,
+	isClaudeCodeAbortErrorMessage,
 	getResultErrorMessage,
 	makeAbortedMessage,
 	mergePendingToolCalls,
@@ -1212,6 +1213,12 @@ describe("stream-adapter — MCP elicitation bridge", () => {
 // ---------------------------------------------------------------------------
 
 describe("stream-adapter — abort classification (F2)", () => {
+	test("recognizes Claude Code SDK abort exceptions", () => {
+		assert.equal(isClaudeCodeAbortErrorMessage("Claude Code process aborted by user"), true);
+		assert.equal(isClaudeCodeAbortErrorMessage("Request aborted by user"), true);
+		assert.equal(isClaudeCodeAbortErrorMessage("rate limit exceeded"), false);
+	});
+
 	test("makeAbortedMessage sets stopReason to 'aborted', not 'error'", () => {
 		const message = makeAbortedMessage("claude-sonnet-4-6", "");
 		assert.equal(message.stopReason, "aborted");

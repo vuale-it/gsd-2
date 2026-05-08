@@ -206,6 +206,83 @@ test("session_start does NOT call setFooter or suppress gsd-health when isAutoAc
   assert.equal(healthWidgetHideCount, 0, "gsd-health must NOT be hidden when isAutoActive() is false");
 });
 
+test("session_start installs the welcome screen as the TUI header", async (t) => {
+  const dir = join(
+    tmpdir(),
+    `gsd-welcome-header-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  mkdirSync(join(dir, "dist"), { recursive: true });
+  writeFileSync(join(dir, "bin", "welcome-screen.js"), "export const stale = true;\n", "utf-8");
+  writeFileSync(
+    join(dir, "dist", "welcome-screen.js"),
+    [
+      "export function buildWelcomeScreenLines(opts) {",
+      "  return [`welcome ${opts.version} ${opts.remoteChannel ?? 'none'} ${opts.width}`];",
+      "}",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  const originalCwd = process.cwd();
+  const originalGsdPkgRoot = process.env.GSD_PKG_ROOT;
+  const originalGsdBinPath = process.env.GSD_BIN_PATH;
+  const originalGsdVersion = process.env.GSD_VERSION;
+  const originalFirstRunBanner = process.env.GSD_FIRST_RUN_BANNER;
+  process.chdir(dir);
+  process.env.GSD_PKG_ROOT = dir;
+  process.env.GSD_BIN_PATH = join(dir, "bin", "loader.js");
+  process.env.GSD_VERSION = "9.9.9-test";
+  delete process.env.GSD_FIRST_RUN_BANNER;
+  t.after(() => {
+    process.chdir(originalCwd);
+    if (originalGsdPkgRoot === undefined) delete process.env.GSD_PKG_ROOT;
+    else process.env.GSD_PKG_ROOT = originalGsdPkgRoot;
+    if (originalGsdBinPath === undefined) delete process.env.GSD_BIN_PATH;
+    else process.env.GSD_BIN_PATH = originalGsdBinPath;
+    if (originalGsdVersion === undefined) delete process.env.GSD_VERSION;
+    else process.env.GSD_VERSION = originalGsdVersion;
+    if (originalFirstRunBanner === undefined) delete process.env.GSD_FIRST_RUN_BANNER;
+    else process.env.GSD_FIRST_RUN_BANNER = originalFirstRunBanner;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void> | void>();
+  const pi = {
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+  } as any;
+
+  registerHooks(pi, []);
+
+  const sessionStart = handlers.get("session_start");
+  assert.ok(sessionStart, "session_start handler must be registered");
+
+  let headerFactory: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
+  await sessionStart!({}, {
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setFooter: () => {},
+      setHeader: (factory: typeof headerFactory) => {
+        headerFactory = factory;
+      },
+      setWorkingMessage: () => {},
+      onTerminalInput: () => () => {},
+      setWidget: () => {},
+    },
+    sessionManager: { getSessionId: () => null },
+    model: null,
+  } as any);
+
+  assert.equal(typeof headerFactory, "function", "session_start should install a header factory");
+  const header = headerFactory!({}, {});
+  assert.deepEqual(header.render(123), ["welcome 9.9.9-test none 123"]);
+});
+
 test("session_start and session_switch apply disabled model provider policy from current preferences", async (t) => {
   const dir = join(
     tmpdir(),

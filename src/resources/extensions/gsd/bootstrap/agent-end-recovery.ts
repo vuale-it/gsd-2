@@ -15,7 +15,12 @@ import { clearPathCache } from "../paths.js";
 import { getAutoDashboardData, getAutoModeStartModel, isAutoActive, pauseAuto, setCurrentDispatchedModelId } from "../auto.js";
 import { getNextFallbackModel, resolveModelWithFallbacksForUnit } from "../preferences.js";
 import { pauseAutoForProviderError } from "../provider-error-pause.js";
-import { isSessionSwitchInFlight, resolveAgentEnd, resolveAgentEndCancelled } from "../auto/resolve.js";
+import {
+  isSessionSwitchAbortGraceActive,
+  isSessionSwitchInFlight,
+  resolveAgentEnd,
+  resolveAgentEndCancelled,
+} from "../auto/resolve.js";
 import { resolveModelId } from "../auto-model-selection.js";
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
@@ -77,6 +82,39 @@ export function isUserInitiatedAbortMessage(message: string | undefined | null):
   return /\b(?:claude code process aborted by user|request aborted by user|process aborted by user)\b/i.test(message);
 }
 
+function readAssistantTextContent(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object") return "";
+      const text = (block as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function isClaudeCodeSessionSwitchAbortMessage(lastMsg: unknown): boolean {
+  if (!lastMsg || typeof lastMsg !== "object") return false;
+  const m = lastMsg as { stopReason?: unknown; errorMessage?: unknown; content?: unknown };
+  const rawErrorMsg = m.errorMessage ? String(m.errorMessage) : "";
+  const textContent = readAssistantTextContent(m.content);
+  const hasUserAbortText =
+    isUserInitiatedAbortMessage(rawErrorMsg) ||
+    isUserInitiatedAbortMessage(textContent);
+
+  if (m.stopReason === "error") {
+    return hasUserAbortText;
+  }
+
+  if (m.stopReason === "aborted") {
+    if (rawErrorMsg && !isUserInitiatedAbortMessage(rawErrorMsg)) return false;
+    return hasUserAbortText || textContent.trim() === "Claude Code stream aborted by caller";
+  }
+
+  return false;
+}
+
 /**
  * Resolve an agent_end event observed while a session switch is in flight.
  *
@@ -89,10 +127,11 @@ export function isUserInitiatedAbortMessage(message: string | undefined | null):
  * "Auto-mode stopped — Unit aborted: Claude Code process aborted by user"
  * even though no user input occurred.
  *
- * The user-abort branch is intentionally ignored when the abort fires while
- * the session-switch is in flight: the abort is the expected side-effect of
- * the transition, not a user signal. Other branches (genuine `stopReason ===
- * "aborted"` with content/errorMessage) preserve the prior behavior.
+ * Claude Code abort markers are intentionally ignored when the abort fires
+ * while the session-switch is in flight: the abort is the expected side-effect
+ * of the transition, not a user signal. Other branches (genuine `stopReason
+ * === "aborted"` with diagnostic content/errorMessage) preserve the prior
+ * behavior.
  */
 export function _handleSessionSwitchAgentEnd(
   lastMsg: unknown,
@@ -100,6 +139,11 @@ export function _handleSessionSwitchAgentEnd(
 ): void {
   if (!lastMsg || typeof lastMsg !== "object") return;
   const m = lastMsg as { stopReason?: unknown; errorMessage?: unknown; content?: unknown };
+
+  if (isClaudeCodeSessionSwitchAbortMessage(m)) {
+    // Internal abort from in-flight session transition — drop on the floor.
+    return;
+  }
 
   if (m.stopReason === "error") {
     const rawErrorMsg = m.errorMessage ? String(m.errorMessage) : "";
@@ -201,6 +245,13 @@ export async function handleAgentEnd(
   const lastMsg = event.messages[event.messages.length - 1];
   if (isSessionSwitchInFlight()) {
     _handleSessionSwitchAgentEnd(lastMsg, resolveAgentEndCancelled);
+    return;
+  }
+
+  if (isSessionSwitchAbortGraceActive() && isClaudeCodeSessionSwitchAbortMessage(lastMsg)) {
+    // Claude Code can report the abort from `newSession()` a few hundred ms
+    // after the guard drops. That event belongs to the old turn; do not let it
+    // cancel the freshly-dispatched unit.
     return;
   }
 
