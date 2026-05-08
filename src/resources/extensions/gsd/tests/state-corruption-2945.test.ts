@@ -291,6 +291,7 @@ describe("#2945 Bug 3: mergeAndExit must teardown worktree after successful merg
       getAutoWorktreePath: () => null,
       autoCommitCurrentBranch: () => {},
       getCurrentBranch: () => "main",
+      checkoutBranch: () => {},
       autoWorktreeBranch: () => "gsd/M001",
       resolveMilestoneFile: () => "/mock/roadmap.md",
       readFileSync: () => "# Roadmap content",

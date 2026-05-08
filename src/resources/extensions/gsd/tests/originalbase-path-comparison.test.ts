@@ -110,6 +110,9 @@ function makeDeps(overrides?: Partial<WorktreeResolverDeps>): WorktreeResolverDe
       calls.push({ fn: "getCurrentBranch", args: [basePath] });
       return "main";
     },
+    checkoutBranch: (basePath: string, branch: string) => {
+      calls.push({ fn: "checkoutBranch", args: [basePath, branch] });
+    },
     autoWorktreeBranch: (milestoneId: string) => `milestone/${milestoneId}`,
     resolveMilestoneFile: (basePath: string, milestoneId: string, fileType: string) => {
       calls.push({ fn: "resolveMilestoneFile", args: [basePath, milestoneId, fileType] });

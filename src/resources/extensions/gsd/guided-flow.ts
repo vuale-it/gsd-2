@@ -86,6 +86,8 @@ export {
 import { logWarning } from "./workflow-logger.js";
 import { deleteRuntimeKv } from "./db/runtime-kv.js";
 import { PAUSED_SESSION_KV_KEY } from "./interrupted-session.js";
+import { buildWorkflowDispatchContent } from "./workflow-protocol.js";
+import { isFullGsdToolSurfaceRequested, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "./bootstrap/register-hooks.js";
 
 type AutoStartOptions = Parameters<typeof startAutoDetached>[4];
 type AutoStartLauncher = typeof startAutoDetached;
@@ -1062,46 +1064,61 @@ async function dispatchWorkflow(
     }
   }
 
-  // Scope tools for discuss flows (#2949).
+  // Scope tools for guided workflow turns (#2949, token-consumption savings).
   // Providers with grammar-based constrained decoding (xAI/Grok) return
   // "Grammar is too complex" when the combined tool schema is too large.
-  // Discuss flows only need a small subset of GSD tools — strip the heavy
-  // planning/execution/completion tools to keep the grammar within limits.
-  let savedTools: string[] | null = null;
-  if (unitType?.startsWith("discuss-")) {
+  // Guided workflow turns only need the active unit's tool surface; strip
+  // unrelated GSD tools and broad non-GSD tools for this queued turn, then
+  // restore so the narrowed surface does not leak into future dispatches.
+  let savedTools: ReturnType<typeof scopeGsdWorkflowToolsForDispatch> = null;
+
+  try {
     const currentTools = pi.getActiveTools();
-    savedTools = currentTools;
-    // Keep all non-GSD tools (builtins, other extensions) and only the
-    // GSD tools on the discuss allowlist.
-    const scopedTools = currentTools.filter(
-      (t) => !t.startsWith("gsd_") || DISCUSS_TOOLS_ALLOWLIST.includes(t),
+    savedTools = {
+      tools: currentTools,
+      visibleSkills: typeof pi.getVisibleSkills === "function" ? pi.getVisibleSkills() : undefined,
+      restoreVisibleSkills: typeof pi.setVisibleSkills === "function",
+    };
+    if (unitType?.startsWith("discuss-") && !isFullGsdToolSurfaceRequested()) {
+      // Keep all non-GSD tools (builtins, other extensions) and only the
+      // GSD tools on the discuss allowlist.
+      const scopedTools = currentTools.filter(
+        (t) => !t.startsWith("gsd_") || DISCUSS_TOOLS_ALLOWLIST.includes(t),
+      );
+      pi.setActiveTools(scopedTools);
+      const scopedState = scopeGsdWorkflowToolsForDispatch(pi, unitType);
+      savedTools = {
+        tools: currentTools,
+        visibleSkills: scopedState?.visibleSkills ?? savedTools.visibleSkills,
+        restoreVisibleSkills: scopedState?.restoreVisibleSkills ?? savedTools.restoreVisibleSkills,
+      };
+      debugLog("discuss-tool-scoping", {
+        unitType,
+        before: currentTools.length,
+        after: pi.getActiveTools().length,
+        removed: currentTools.length - pi.getActiveTools().length,
+      });
+    } else {
+      savedTools = scopeGsdWorkflowToolsForDispatch(pi, unitType) ?? savedTools;
+    }
+
+    const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
+    const workflow = readFileSync(workflowPath, "utf-8");
+
+    pi.sendMessage(
+      {
+        customType,
+        content: buildWorkflowDispatchContent({ workflow, workflowPath, task: note }),
+        display: false,
+      },
+      { triggerTurn: true },
     );
-    pi.setActiveTools(scopedTools);
-    debugLog("discuss-tool-scoping", {
-      unitType,
-      before: currentTools.length,
-      after: scopedTools.length,
-      removed: currentTools.length - scopedTools.length,
-    });
-  }
-
-  const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
-  const workflow = readFileSync(workflowPath, "utf-8");
-
-  pi.sendMessage(
-    {
-      customType,
-      content: `Read the following GSD workflow protocol and execute exactly.\n\n${workflow}\n\n## Your Task\n\n${note}`,
-      display: false,
-    },
-    { triggerTurn: true },
-  );
-
-  // Restore full tool set after the message is queued. The LLM turn has
-  // already captured the scoped set — restoring prevents the narrowed
-  // tools from leaking into subsequent dispatches (#3628).
-  if (savedTools) {
-    pi.setActiveTools(savedTools);
+  } finally {
+    // Restore full tool set after the message is queued. The LLM turn has
+    // already captured the scoped set — restoring prevents the narrowed
+    // tools from leaking into subsequent dispatches (#3628). The finally
+    // block ensures restoration even if sendMessage throws.
+    restoreGsdWorkflowTools(pi, savedTools);
   }
 }
 

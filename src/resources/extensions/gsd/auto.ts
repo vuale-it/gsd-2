@@ -151,6 +151,7 @@ import {
   resolveProjectRoot,
 } from "./worktree.js";
 import { GitServiceImpl } from "./git-service.js";
+import { nativeCheckoutBranch } from "./native-git-bridge.js";
 import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import {
   createAutoWorktree,
@@ -1451,6 +1452,7 @@ function buildResolverDeps(): WorktreeResolverDeps {
     getAutoWorktreePath,
     autoCommitCurrentBranch,
     getCurrentBranch,
+    checkoutBranch: nativeCheckoutBranch,
     autoWorktreeBranch,
     resolveMilestoneFile,
     readFileSync: (path: string, encoding: string) =>

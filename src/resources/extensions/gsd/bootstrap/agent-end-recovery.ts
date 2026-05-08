@@ -2,6 +2,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
+import type { ErrorContext } from "../auto/types.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   checkDeepProjectSetupAfterTurn,
@@ -74,6 +75,49 @@ export function _buildAbortedPauseContext(lastMsg: { errorMessage?: unknown }): 
 export function isUserInitiatedAbortMessage(message: string | undefined | null): boolean {
   if (!message) return false;
   return /\b(?:claude code process aborted by user|request aborted by user|process aborted by user)\b/i.test(message);
+}
+
+/**
+ * Resolve an agent_end event observed while a session switch is in flight.
+ *
+ * #5538-followup: When `newSession()` aborts an in-flight stream as part of a
+ * session transition (run-unit.ts:63 → _settleCurrentTurnForSessionTransition
+ * → agent.abort()), the SDK emits "Claude Code process aborted by user" or
+ * "Request aborted by user" against the previous unit's turn. The previous
+ * code path treated that as a user cancellation and propagated it to the next
+ * unit via the pending-switch-cancellation queue, killing auto-mode with
+ * "Auto-mode stopped — Unit aborted: Claude Code process aborted by user"
+ * even though no user input occurred.
+ *
+ * The user-abort branch is intentionally ignored when the abort fires while
+ * the session-switch is in flight: the abort is the expected side-effect of
+ * the transition, not a user signal. Other branches (genuine `stopReason ===
+ * "aborted"` with content/errorMessage) preserve the prior behavior.
+ */
+export function _handleSessionSwitchAgentEnd(
+  lastMsg: unknown,
+  resolveCancelled: (ctx: ErrorContext) => boolean,
+): void {
+  if (!lastMsg || typeof lastMsg !== "object") return;
+  const m = lastMsg as { stopReason?: unknown; errorMessage?: unknown; content?: unknown };
+
+  if (m.stopReason === "error") {
+    const rawErrorMsg = m.errorMessage ? String(m.errorMessage) : "";
+    if (isUserInitiatedAbortMessage(rawErrorMsg)) {
+      // Internal abort from in-flight session transition — drop on the floor.
+      return;
+    }
+    return;
+  }
+
+  if (m.stopReason === "aborted") {
+    const content = m.content;
+    const hasEmptyContent = Array.isArray(content) && content.length === 0;
+    const hasErrorMessage = !!m.errorMessage;
+    if (!hasEmptyContent || hasErrorMessage) {
+      resolveCancelled(_buildAbortedPauseContext(m as { errorMessage?: unknown }));
+    }
+  }
 }
 
 async function pauseTransientWithBackoff(
@@ -156,23 +200,7 @@ export async function handleAgentEnd(
 
   const lastMsg = event.messages[event.messages.length - 1];
   if (isSessionSwitchInFlight()) {
-    if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "error") {
-      const rawErrorMsg = ("errorMessage" in lastMsg && lastMsg.errorMessage) ? String(lastMsg.errorMessage) : "";
-      if (isUserInitiatedAbortMessage(rawErrorMsg)) {
-        resolveAgentEndCancelled({
-          message: rawErrorMsg,
-          category: "aborted",
-          isTransient: false,
-        });
-      }
-    } else if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "aborted") {
-      const content = "content" in lastMsg ? lastMsg.content : undefined;
-      const hasEmptyContent = Array.isArray(content) && content.length === 0;
-      const hasErrorMessage = "errorMessage" in lastMsg && !!lastMsg.errorMessage;
-      if (!hasEmptyContent || hasErrorMessage) {
-        resolveAgentEndCancelled(_buildAbortedPauseContext(lastMsg as { errorMessage?: unknown }));
-      }
-    }
+    _handleSessionSwitchAgentEnd(lastMsg, resolveAgentEndCancelled);
     return;
   }
 

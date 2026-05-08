@@ -78,6 +78,7 @@ import {
   nativeUpdateRef,
   nativeIsAncestor,
   nativeMergeAbort,
+  nativeWorktreeList,
 } from "./native-git-bridge.js";
 import { gsdHome } from "./gsd-home.js";
 import { type MilestoneScope, type GsdWorkspace, createWorkspace } from "./workspace.js";
@@ -1180,6 +1181,122 @@ export function enterBranchModeForMilestone(
  * (both formerly here) became dead.
  */
 
+/**
+ * True when `branch` is checked out in any worktree listed by
+ * `git worktree list --porcelain`. Used to gate ref updates that would
+ * otherwise leave a concurrent worktree's HEAD inconsistent with its
+ * index/working tree (Codex peer-review of #5538-followup).
+ *
+ * Best-effort: a `nativeWorktreeList` failure returns true so we err on
+ * the side of NOT moving the ref. Better to skip a fast-forward than to
+ * silently corrupt another worktree.
+ */
+export function _isBranchCheckedOutElsewhere(
+  basePath: string,
+  branch: string,
+): boolean {
+  try {
+    const entries = nativeWorktreeList(basePath);
+    return entries.some((entry) => entry.branch === branch);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Resolve the integration branch using the same 3-tier fallback as the
+ * fresh-create path: META.json → git.main_branch preference → detected
+ * main branch. Returns null when no usable target exists.
+ */
+function _resolveIntegrationBranchForReuse(
+  basePath: string,
+  milestoneId: string,
+): string | null {
+  const fromMeta = readIntegrationBranch(basePath, milestoneId);
+  if (fromMeta) return fromMeta;
+
+  const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
+  const fromPref = gitPrefs?.main_branch &&
+    typeof gitPrefs.main_branch === "string" &&
+    gitPrefs.main_branch.length > 0 &&
+    nativeBranchExists(basePath, gitPrefs.main_branch)
+    ? gitPrefs.main_branch
+    : null;
+  if (fromPref) return fromPref;
+
+  try {
+    return nativeDetectMainBranch(basePath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When reusing an existing milestone branch, fast-forward it onto the
+ * integration branch when that's safe (branch is a strict ancestor of
+ * integration — no commits would be lost). Skips when the branch has its
+ * own commits ahead of integration, when the integration branch can't be
+ * resolved, or when any git operation fails — the merge gate at milestone
+ * completion will surface real divergence as a conflict.
+ *
+ * The previous behavior re-attached the worktree to whatever stale tip
+ * the branch held, which caused new milestone work to fork from a base
+ * missing prior milestones' merges (#5538-followup).
+ */
+export function fastForwardReusedMilestoneBranchIfSafe(
+  basePath: string,
+  milestoneId: string,
+  branch: string,
+): void {
+  try {
+    const integrationBranch = _resolveIntegrationBranchForReuse(basePath, milestoneId);
+    if (!integrationBranch || integrationBranch === branch) return;
+    if (!nativeBranchExists(basePath, integrationBranch)) return;
+
+    // Pure fast-forward only: branch must be a strict ancestor of integration.
+    // If the branch has its own commits ahead, leave it alone.
+    if (!nativeIsAncestor(basePath, branch, integrationBranch)) {
+      debugLog("createAutoWorktree", {
+        phase: "skip-ff-branch-not-ancestor",
+        milestoneId,
+        branch,
+        integration: integrationBranch,
+      });
+      return;
+    }
+
+    // Codex peer-review: `nativeUpdateRef` succeeds even when the branch is
+    // currently checked out in another worktree, leaving that worktree's HEAD
+    // inconsistent with its index/work tree. Skip the fast-forward if any
+    // listed worktree has this branch checked out — the merge gate at
+    // milestone-completion will surface stale-base divergence as a conflict
+    // instead of silently corrupting the other worktree's state.
+    if (_isBranchCheckedOutElsewhere(basePath, branch)) {
+      debugLog("createAutoWorktree", {
+        phase: "skip-ff-branch-checked-out-elsewhere",
+        milestoneId,
+        branch,
+      });
+      return;
+    }
+
+    nativeUpdateRef(basePath, `refs/heads/${branch}`, integrationBranch);
+    debugLog("createAutoWorktree", {
+      phase: "fast-forward-reused-branch",
+      milestoneId,
+      branch,
+      integration: integrationBranch,
+    });
+  } catch (err) {
+    debugLog("createAutoWorktree", {
+      phase: "fast-forward-reused-branch-failed",
+      milestoneId,
+      branch,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function createAutoWorktree(
   basePath: string,
   milestoneId: string,
@@ -1206,6 +1323,12 @@ export function createAutoWorktree(
 
   let info: { name: string; path: string; branch: string; exists: boolean };
   if (branchExists) {
+    // #5538-followup: fast-forward the reused branch onto the integration
+    // branch when safe so the next milestone forks from up-to-date code.
+    // Without this, a milestone that was created before another milestone
+    // merged into main would carry a stale base into its worktree.
+    fastForwardReusedMilestoneBranchIfSafe(basePath, milestoneId, branch);
+
     // Re-attach worktree to the existing milestone branch (preserving commits)
     info = createWorktree(basePath, milestoneId, {
       branch,

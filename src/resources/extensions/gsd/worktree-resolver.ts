@@ -40,6 +40,16 @@ function isSamePath(a: string, b: string): boolean {
   return normalizeWorktreePathForCompare(a) === normalizeWorktreePathForCompare(b);
 }
 
+class UserNotifiedError extends Error {
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "UserNotifiedError";
+    this.cause = cause;
+  }
+}
+
 // ─── Dependency Interface ──────────────────────────────────────────────────
 
 export interface WorktreeResolverDeps {
@@ -71,6 +81,13 @@ export interface WorktreeResolverDeps {
     milestoneId: string,
   ) => void;
   getCurrentBranch: (basePath: string) => string;
+  /**
+   * Force-checkout the named branch in `basePath`. Required by `_mergeBranchMode`
+   * when it discovers the working tree is not on the milestone branch — preflight
+   * stash + later operations may have switched HEAD to main, and silently skipping
+   * the merge would strand the milestone's commits.
+   */
+  checkoutBranch: (basePath: string, branch: string) => void;
   autoWorktreeBranch: (milestoneId: string) => string;
   resolveMilestoneFile: (
     basePath: string,
@@ -824,16 +841,41 @@ export class WorktreeResolver {
       const milestoneBranch = this.deps.autoWorktreeBranch(milestoneId);
 
       if (currentBranch !== milestoneBranch) {
+        // #5538-followup: previous behavior was to silently `return false`
+        // when HEAD wasn't on the milestone branch — that let the loop
+        // advance with the milestone's commits stranded on the branch (the
+        // exact failure mode reported in the test12345 repro). Attempt
+        // recovery by force-checking-out the milestone branch; if the
+        // checkout fails, throw so the caller pauses auto-mode and the user
+        // sees the failure instead of a silent merge skip.
         debugLog("WorktreeResolver", {
           action: "mergeAndExit",
           milestoneId,
           mode: "branch",
-          skipped: true,
-          reason: "not-on-milestone-branch",
+          recovery: "checkout-milestone-branch",
           currentBranch,
           milestoneBranch,
         });
-        return false;
+        try {
+          this.deps.checkoutBranch(this.s.basePath, milestoneBranch);
+        } catch (checkoutErr) {
+          const checkoutMsg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+          ctx.notify(
+            `Cannot merge milestone ${milestoneId}: working tree is on ${currentBranch} and checkout to ${milestoneBranch} failed (${checkoutMsg}). Resolve manually and run /gsd auto to resume.`,
+            "error",
+          );
+          throw new UserNotifiedError(checkoutMsg, checkoutErr);
+        }
+
+        const reverify = this.deps.getCurrentBranch(this.s.basePath);
+        if (reverify !== milestoneBranch) {
+          const reverifyMsg = `branch checkout to ${milestoneBranch} reported success but current branch is ${reverify}`;
+          ctx.notify(
+            `Cannot merge milestone ${milestoneId}: ${reverifyMsg}. Resolve manually and run /gsd auto to resume.`,
+            "error",
+          );
+          throw new UserNotifiedError(reverifyMsg);
+        }
       }
 
       const roadmapPath = this.deps.resolveMilestoneFile(
@@ -890,7 +932,9 @@ export class WorktreeResolver {
         result: "error",
         error: msg,
       });
-      ctx.notify(`Milestone merge failed (branch mode): ${msg}`, "warning");
+      if (!(err instanceof UserNotifiedError)) {
+        ctx.notify(`Milestone merge failed (branch mode): ${msg}`, "warning");
+      }
       // Re-throw all errors so callers can apply their own recovery logic (#4380).
       throw err;
     }
@@ -918,6 +962,7 @@ export class WorktreeResolver {
     try {
       this.mergeAndExit(currentMilestoneId, ctx);
     } catch (err) {
+      if (err instanceof UserNotifiedError) throw err;
       // mergeAndExit emits a warning and restores state when it fails during
       // merge/cleanup. But if it throws before recovery runs (e.g., in
       // validateMilestoneId or emitJournalEvent), basePath won't be restored

@@ -26,6 +26,15 @@ import { isAutoActive, checkRemoteAutoSession } from "./auto.js";
 import { getAutoWorktreePath } from "./auto-worktree.js";
 import { currentDirectoryRoot, projectRoot } from "./commands/context.js";
 import { loadPrompt } from "./prompt-loader.js";
+import {
+  buildDoctorHealIssuePayload,
+  buildDoctorHealSummary,
+  buildWorkflowDispatchContent,
+} from "./workflow-protocol.js";
+import {
+  restoreGsdWorkflowTools,
+  scopeGsdWorkflowToolsForDispatch,
+} from "./bootstrap/register-hooks.js";
 
 const UPDATE_REGISTRY_URL = "https://registry.npmjs.org/gsd-pi/latest";
 const UPDATE_FETCH_TIMEOUT_MS = 5000;
@@ -72,18 +81,23 @@ export function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, 
   const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
   const workflow = readFileSync(workflowPath, "utf-8");
   const prompt = loadPrompt("doctor-heal", {
-    doctorSummary: reportText,
-    structuredIssues,
+    doctorSummary: buildDoctorHealSummary(reportText),
+    structuredIssues: buildDoctorHealIssuePayload(structuredIssues),
     scopeLabel: scope ?? "active milestone / blocking scope",
     doctorCommandSuffix: scope ? ` ${scope}` : "",
   });
 
-  const content = `Read the following GSD workflow protocol and execute exactly.\n\n${workflow}\n\n## Your Task\n\n${prompt}`;
+  const content = buildWorkflowDispatchContent({ workflow, workflowPath, task: prompt });
+  const savedTools = scopeGsdWorkflowToolsForDispatch(pi);
 
-  pi.sendMessage(
-    { customType: "gsd-doctor-heal", content, display: false },
-    { triggerTurn: true },
-  );
+  try {
+    pi.sendMessage(
+      { customType: "gsd-doctor-heal", content, display: false },
+      { triggerTurn: true },
+    );
+  } finally {
+    restoreGsdWorkflowTools(pi, savedTools);
+  }
 }
 
 /** Parse doctor command args into structured flags and positionals (pure, no I/O). */
@@ -258,15 +272,20 @@ export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAP
 
   const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
   const workflow = readFileSync(workflowPath, "utf-8");
+  const savedTools = scopeGsdWorkflowToolsForDispatch(pi);
 
-  pi.sendMessage(
-    {
-      customType: "gsd-triage",
-      content: `Read the following GSD workflow protocol and execute exactly.\n\n${workflow}\n\n## Your Task\n\n${prompt}`,
-      display: false,
-    },
-    { triggerTurn: true },
-  );
+  try {
+    pi.sendMessage(
+      {
+        customType: "gsd-triage",
+        content: buildWorkflowDispatchContent({ workflow, workflowPath, task: prompt }),
+        display: false,
+      },
+      { triggerTurn: true },
+    );
+  } finally {
+    restoreGsdWorkflowTools(pi, savedTools);
+  }
 }
 
 export async function handleSteer(change: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {

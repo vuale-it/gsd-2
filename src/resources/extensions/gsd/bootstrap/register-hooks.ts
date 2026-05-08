@@ -1,3 +1,6 @@
+// Project/App: GSD-2
+// File Purpose: Registers GSD extension runtime hooks and token-saving tool policies.
+
 import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
@@ -25,6 +28,7 @@ import { initNotificationWidget } from "../notification-widget.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { extractSubagentAgentClasses } from "./subagent-input.js";
 import { approvalGateIdForUnit, isExplicitApprovalResponse, shouldPauseForUserApprovalQuestion } from "../user-input-boundary.js";
+import { resolveSkillManifest } from "../skill-manifest.js";
 
 // Skip the welcome screen on the very first session_start — cli.ts already
 // printed it before the TUI launched. Only re-print on /clear (subsequent sessions).
@@ -37,6 +41,174 @@ interface DeferredApprovalGate {
 }
 
 let deferredApprovalGate: DeferredApprovalGate | null = null;
+
+export const MINIMAL_GSD_TOOL_NAMES = [
+  "gsd_exec",
+  "gsd_exec_search",
+  "gsd_resume",
+  "gsd_milestone_status",
+  "gsd_checkpoint_db",
+  "memory_query",
+  "capture_thought",
+] as const;
+
+export const MINIMAL_AUTO_BASE_TOOL_NAMES = [
+  "ask_user_questions",
+  "bash",
+  "bg_shell",
+  "edit",
+  "glob",
+  "grep",
+  "ls",
+  "read",
+  "write",
+] as const;
+
+const AUTO_UNIT_SCOPED_TOOLS: Record<string, readonly string[]> = {
+  "research-milestone": ["gsd_summary_save", "gsd_decision_save"],
+  "plan-milestone": ["gsd_plan_milestone", "gsd_decision_save", "gsd_requirement_update"],
+  "discuss-milestone": ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save"],
+  "validate-milestone": ["gsd_validate_milestone", "gsd_reassess_roadmap", "subagent"],
+  "complete-milestone": ["gsd_complete_milestone", "subagent"],
+  "research-slice": ["gsd_summary_save", "gsd_decision_save"],
+  "plan-slice": ["gsd_plan_slice", "gsd_plan_task", "gsd_decision_save"],
+  "refine-slice": ["gsd_plan_slice", "gsd_plan_task", "gsd_decision_save"],
+  "replan-slice": ["gsd_replan_slice", "gsd_plan_task", "gsd_decision_save"],
+  "complete-slice": ["gsd_slice_complete", "gsd_decision_save", "gsd_requirement_update", "subagent"],
+  "reassess-roadmap": ["gsd_reassess_roadmap"],
+  "execute-task": ["gsd_task_complete", "gsd_decision_save"],
+  "execute-task-simple": ["gsd_task_complete", "gsd_decision_save"],
+  "reactive-execute": ["gsd_task_complete", "gsd_decision_save"],
+  "run-uat": ["gsd_summary_save"],
+  "gate-evaluate": ["gsd_save_gate_result"],
+  "rewrite-docs": ["gsd_summary_save", "gsd_decision_save"],
+  "workflow-preferences": ["gsd_summary_save"],
+  "discuss-project": ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save"],
+  "discuss-requirements": ["gsd_requirement_save", "gsd_summary_save"],
+  "research-decision": ["gsd_summary_save"],
+  "research-project": ["gsd_summary_save", "gsd_decision_save"],
+};
+
+const WORKFLOW_GSD_TOOL_NAMES = [
+  ...MINIMAL_GSD_TOOL_NAMES,
+  ...Object.values(AUTO_UNIT_SCOPED_TOOLS).flat(),
+].filter(isGsdManagedTool);
+
+function isGsdManagedTool(name: string): boolean {
+  return name.startsWith("gsd_") || name === "memory_query" || name === "capture_thought" || name === "gsd_graph";
+}
+
+export function buildMinimalGsdToolSet(activeToolNames: readonly string[]): string[] {
+  const active = new Set(activeToolNames);
+  const preserved = activeToolNames.filter((name) => !isGsdManagedTool(name));
+  const minimal = MINIMAL_GSD_TOOL_NAMES.filter((name) => active.has(name));
+  return [...new Set([...preserved, ...minimal])];
+}
+
+export function buildMinimalAutoGsdToolSet(
+  activeToolNames: readonly string[],
+  unitType: string | undefined,
+): string[] {
+  const active = new Set(activeToolNames);
+  const unitTools = unitType ? AUTO_UNIT_SCOPED_TOOLS[unitType] ?? [] : [];
+  const autoBaseTools = new Set<string>(MINIMAL_AUTO_BASE_TOOL_NAMES);
+  const preserved = activeToolNames.filter((name) => autoBaseTools.has(name));
+  const scoped = [...MINIMAL_GSD_TOOL_NAMES, ...unitTools].filter((name) => active.has(name));
+  return [...new Set([...preserved, ...scoped])];
+}
+
+export function buildMinimalGsdWorkflowToolSet(activeToolNames: readonly string[]): string[] {
+  const active = new Set(activeToolNames);
+  const autoBaseTools = new Set<string>(MINIMAL_AUTO_BASE_TOOL_NAMES);
+  const preserved = activeToolNames.filter((name) => autoBaseTools.has(name));
+  const scoped = WORKFLOW_GSD_TOOL_NAMES.filter((name) => active.has(name));
+  return [...new Set([...preserved, ...scoped])];
+}
+
+export function buildRequestScopedGsdToolSet(
+  activeToolNames: readonly string[],
+  requestCustomMessages: readonly { customType?: string }[] | undefined,
+): string[] | undefined {
+  for (let index = (requestCustomMessages?.length ?? 0) - 1; index >= 0; index--) {
+    const currentCustomType = requestCustomMessages?.[index]?.customType;
+    if (
+      currentCustomType === "gsd-run" ||
+      currentCustomType === "gsd-discuss" ||
+      currentCustomType === "gsd-doctor-heal" ||
+      currentCustomType === "gsd-triage"
+    ) {
+      return buildMinimalGsdWorkflowToolSet(activeToolNames);
+    }
+  }
+  return undefined;
+}
+
+export function isFullGsdToolSurfaceRequested(): boolean {
+  return process.env.PI_GSD_FULL_TOOLS === "1";
+}
+
+function isGeneralGsdToolScopingRequested(): boolean {
+  return process.env.PI_GSD_MINIMAL_TOOLS === "1";
+}
+
+export interface ScopedGsdWorkflowState {
+  tools: string[] | null;
+  visibleSkills: string[] | undefined;
+  restoreVisibleSkills: boolean;
+}
+
+type GsdWorkflowScopeApi = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools"> & Partial<Pick<ExtensionAPI, "getVisibleSkills" | "setVisibleSkills">>;
+
+function applyMinimalGsdToolSurface(pi: ExtensionAPI): void {
+  if (isFullGsdToolSurfaceRequested()) return;
+  const dash = getAutoRuntimeSnapshot();
+  if (dash.active && dash.currentUnit) {
+    pi.setActiveTools(buildMinimalAutoGsdToolSet(pi.getActiveTools(), dash.currentUnit.type));
+    return;
+  }
+  if (!isGeneralGsdToolScopingRequested()) return;
+  pi.setActiveTools(buildMinimalGsdToolSet(pi.getActiveTools()));
+}
+
+export function scopeGsdWorkflowToolsForDispatch(
+  pi: GsdWorkflowScopeApi,
+  unitType?: string,
+): ScopedGsdWorkflowState | null {
+  if (isFullGsdToolSurfaceRequested()) return null;
+  const current = pi.getActiveTools();
+  const scoped = unitType
+    ? buildMinimalAutoGsdToolSet(current, unitType)
+    : buildMinimalGsdWorkflowToolSet(current);
+  const toolsChanged = !(scoped.length === current.length && scoped.every((name, index) => name === current[index]));
+  const skillManifest = resolveSkillManifest(unitType);
+  const canScopeSkills = skillManifest !== null && pi.getVisibleSkills && pi.setVisibleSkills;
+  if (!toolsChanged && !canScopeSkills) {
+    return null;
+  }
+  if (toolsChanged) {
+    pi.setActiveTools(scoped);
+  }
+  const visibleSkills = canScopeSkills ? pi.getVisibleSkills!() : undefined;
+  if (canScopeSkills) {
+    pi.setVisibleSkills!(skillManifest);
+  }
+  return {
+    tools: toolsChanged ? current : null,
+    visibleSkills,
+    restoreVisibleSkills: Boolean(canScopeSkills),
+  };
+}
+
+export function restoreGsdWorkflowTools(
+  pi: Pick<ExtensionAPI, "setActiveTools"> & Partial<Pick<ExtensionAPI, "setVisibleSkills">>,
+  savedState: ScopedGsdWorkflowState | null,
+): void {
+  if (!savedState) return;
+  if (savedState.tools) pi.setActiveTools(savedState.tools);
+  if (savedState.restoreVisibleSkills && pi.setVisibleSkills) {
+    pi.setVisibleSkills(savedState.visibleSkills);
+  }
+}
 
 async function deriveGsdState(basePath: string) {
   const { deriveState } = await import("../state.js");
@@ -268,6 +440,8 @@ export function registerHooks(
   });
 
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
+    applyMinimalGsdToolSurface(pi);
+
     // Wait for ecosystem loader to finish (no-op after first turn).
     const { getEcosystemReadyPromise } = await import("../ecosystem/loader.js");
     await getEcosystemReadyPromise();
@@ -879,8 +1053,21 @@ export function registerHooks(
   // Tool set adaptation hook (ADR-005 Phase 4)
   // Extensions can override tool set after model selection by returning { toolNames: [...] }
   // Return undefined to let the built-in provider compatibility filtering proceed.
-  pi.on("adjust_tool_set", async (_event) => {
-    // Default: no override — let provider capability filtering handle tool set
+  pi.on("adjust_tool_set", async (event) => {
+    if (isFullGsdToolSurfaceRequested()) return undefined;
+    const removed = new Set(event.filteredTools);
+    const providerCompatible = event.activeToolNames.filter((name) => !removed.has(name));
+    const requestScoped = buildRequestScopedGsdToolSet(providerCompatible, event.requestCustomMessages);
+    if (requestScoped) {
+      return { toolNames: requestScoped };
+    }
+    const dash = getAutoRuntimeSnapshot();
+    if (dash.active && dash.currentUnit) {
+      return { toolNames: buildMinimalAutoGsdToolSet(providerCompatible, dash.currentUnit.type) };
+    }
+    if (isGeneralGsdToolScopingRequested()) {
+      return { toolNames: buildMinimalGsdToolSet(providerCompatible) };
+    }
     return undefined;
   });
 }

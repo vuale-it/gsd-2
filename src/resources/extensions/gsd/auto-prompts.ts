@@ -45,12 +45,12 @@ import { classifyProject, type ProjectClassification } from "./detection.js";
 // ─── Preamble Cap ─────────────────────────────────────────────────────────────
 
 /**
- * Historical static ceiling for the preamble cap. Kept as an upper bound even
+ * Static ceiling for the preamble cap. Kept as an upper bound even
  * after context-window-aware sizing so large-window users don't suddenly see
- * 10× looser caps than before. Small-window users get a tighter cap derived
+ * 10× looser caps than needed. Small-window users get a tighter cap derived
  * from their configured executor window.
  */
-const MAX_PREAMBLE_CHARS = 30_000;
+const MAX_PREAMBLE_CHARS = 20_000;
 
 /**
  * Resolve prompt budgets from the configured executor context window.
@@ -185,8 +185,8 @@ function formatCloseoutReviewInstructions(validationContent: string | null, vali
 }
 
 function capPreamble(preamble: string): string {
-  // Cap inlined context at min(historical 30K ceiling, scaled inline budget).
-  // The ceiling preserves pre-fix behavior for large-window users; the scaled
+  // Cap inlined context at min(static ceiling, scaled inline budget).
+  // The ceiling bounds repeated auto prompt payloads; the scaled
   // budget tightens the cap for small-window users whose true safe limit is
   // below 30K. `computeBudgets` allocates 40% of total chars to inline context.
   const budget = Math.min(MAX_PREAMBLE_CHARS, resolvePromptBudgets().inlineContextBudgetChars);
@@ -636,8 +636,81 @@ export async function buildSliceSummaryExcerpt(
     return lines.join("\n");
   } catch {
     // Defensive — any parse failure falls back to full inline.
-    return `### ${sid} Summary\nSource: \`${relPath}\`\n\n${content.trim()}`;
+    return `### ${sid} Summary\nSource: \`${relPath}\`\n\n${capMalformedSummary(content, relPath)}`;
   }
+}
+
+export async function buildTaskSummaryExcerpt(
+  absPath: string | null, relPath: string, tid: string, options?: { blocker?: boolean },
+): Promise<string> {
+  const label = options?.blocker ? "Blocker Task Summary" : "Task Summary";
+  const header = `### ${label}: ${tid} (excerpt)\nSource: \`${relPath}\``;
+  const content = absPath ? await loadFile(absPath) : null;
+  if (!content) {
+    return `${header}\n\n_(not found — file does not exist yet)_`;
+  }
+
+  try {
+    const s = parseSummary(content);
+    if (!s.frontmatter.id) {
+      return `### ${label}: ${tid}\nSource: \`${relPath}\`\n\n${capMalformedSummary(content, relPath)}`;
+    }
+
+    const lines: string[] = [header, ""];
+    if (s.title) lines.push(`**Title:** ${s.title}`);
+    if (s.oneLiner) lines.push(`**One-liner:** ${s.oneLiner}`);
+    if (s.frontmatter.verification_result) {
+      lines.push(`**Verification:** \`${s.frontmatter.verification_result}\``);
+    }
+    lines.push(`**Blocker discovered:** ${s.frontmatter.blocker_discovered ? "yes — read full summary if blocker details are insufficient" : "no"}`);
+    if (s.frontmatter.provides.length > 0) lines.push(`**Provides:** ${s.frontmatter.provides.slice(0, 4).join("; ")}`);
+    if (s.frontmatter.key_decisions.length > 0) lines.push(`**Key decisions:** ${s.frontmatter.key_decisions.slice(0, 4).join("; ")}`);
+    if (s.frontmatter.patterns_established.length > 0) lines.push(`**Patterns established:** ${s.frontmatter.patterns_established.slice(0, 4).join("; ")}`);
+    if (s.frontmatter.key_files.length > 0) {
+      const files = s.frontmatter.key_files.slice(0, 6);
+      const more = s.frontmatter.key_files.length > files.length ? ` (+${s.frontmatter.key_files.length - files.length} more)` : "";
+      lines.push(`**Key files:** ${files.join(", ")}${more}`);
+    }
+
+    const SECTION_CAP_CHARS = 500;
+    const capSection = (body: string): string => {
+      const trimmed = body.trim();
+      if (trimmed.length <= SECTION_CAP_CHARS) return trimmed;
+      return `${trimmed.slice(0, SECTION_CAP_CHARS)}\n… (truncated — see full \`${relPath}\`)`;
+    };
+
+    const verification = extractMarkdownSection(content, "Verification");
+    const diagnostics = extractMarkdownSection(content, "Diagnostics");
+    const knownIssues = extractMarkdownSection(content, "Known Issues");
+
+    if (verification && verification.trim()) {
+      lines.push("", "#### Verification", capSection(verification));
+    }
+    if (diagnostics && diagnostics.trim()) {
+      lines.push("", "#### Diagnostics", capSection(diagnostics));
+    }
+    if (s.deviations && s.deviations.trim()) {
+      lines.push("", "#### Deviations", capSection(s.deviations));
+    }
+    if (knownIssues && knownIssues.trim()) {
+      lines.push("", "#### Known issues", capSection(knownIssues));
+    }
+
+    lines.push(
+      "",
+      `> **On-demand:** read \`${relPath}\` only when this excerpt is absent/truncated or you need fuller blocker, implementation, or file-change evidence.`,
+    );
+    return lines.join("\n");
+  } catch {
+    return `### ${label}: ${tid}\nSource: \`${relPath}\`\n\n${capMalformedSummary(content, relPath)}`;
+  }
+}
+
+function capMalformedSummary(content: string, relPath: string): string {
+  const trimmed = content.trim();
+  const limit = 1_500;
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit).trimEnd()}\n\n[Truncated malformed summary — read \`${relPath}\` for full details.]`;
 }
 
 /**
@@ -914,7 +987,7 @@ export async function inlineKnowledgeScoped(
  * plan-milestone, complete-slice, complete-milestone, validate-milestone,
  * reassess-roadmap) previously injected the full KNOWLEDGE.md (~226KB for a
  * real project) on every invocation. This helper scopes by caller-supplied
- * keywords and caps the payload at `maxChars` (default 30,000 chars).
+ * keywords and caps the payload at `maxChars` (default 12,000 chars).
  *
  * Returns null when no KNOWLEDGE.md exists or no entries match any keyword.
  */
@@ -923,7 +996,7 @@ export async function inlineKnowledgeBudgeted(
   keywords: string[],
   options?: { maxChars?: number },
 ): Promise<string | null> {
-  const DEFAULT_MAX_CHARS = 30_000;
+  const DEFAULT_MAX_CHARS = 12_000;
   const HARD_MAX_CHARS = 100_000;
   const raw = Number(options?.maxChars ?? DEFAULT_MAX_CHARS);
   const maxChars = Number.isFinite(raw)
@@ -2378,10 +2451,9 @@ export async function buildCompleteSlicePrompt(
         const blocks: string[] = [];
         for (const file of summaryFiles) {
           const absPath = join(tDir, file);
-          const content = await loadFile(absPath);
-          if (!content) continue;
           const relPath = `${sRel}/tasks/${file}`;
-          blocks.push(`### Task Summary: ${file.replace(/-SUMMARY\.md$/i, "")}\nSource: \`${relPath}\`\n\n${content.trim()}`);
+          const taskId = file.replace(/-SUMMARY\.md$/i, "");
+          blocks.push(await buildTaskSummaryExcerpt(absPath, relPath, taskId));
         }
         return blocks.length > 0 ? blocks.join("\n\n---\n\n") : null;
       }
@@ -2758,7 +2830,7 @@ export async function buildReplanSlicePrompt(
       const relPath = `${sRel}/tasks/${file}`;
       if (summary.frontmatter.blocker_discovered) {
         blockerTaskId = summary.frontmatter.id || file.replace(/-SUMMARY\.md$/i, "");
-        inlined.push(`### Blocker Task Summary: ${blockerTaskId}\nSource: \`${relPath}\`\n\n${content.trim()}`);
+        inlined.push(await buildTaskSummaryExcerpt(absPath, relPath, blockerTaskId, { blocker: true }));
       }
     }
   }

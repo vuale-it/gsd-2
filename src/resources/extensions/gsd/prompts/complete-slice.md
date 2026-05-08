@@ -29,7 +29,7 @@ Use `subagent` only for fresh-context review when useful: reviewer for cross-cut
 7. If requirement status changed, call `gsd_requirement_update`; do not write `.gsd/REQUIREMENTS.md` directly.
 8. Prepare `gsd_slice_complete` content with camelCase fields `milestoneId`, `sliceId`, `sliceTitle`, `oneLiner`, `narrative`, `verification`, and `uatContent`.
 9. Draft concrete UAT with preconditions, numbered steps, expected outcomes, edge cases, UAT Type, and Not Proven By This UAT.
-10. Review task summaries for DECISIONS.md and KNOWLEDGE.md-worthy decisions, patterns, and gotchas. Capture significant items with `capture_thought`; do not append knowledge files directly.
+10. Review the inlined task-summary excerpts for DECISIONS.md and KNOWLEDGE.md-worthy decisions, patterns, and gotchas. Read full `*-SUMMARY.md` files only when an excerpt is absent, truncated, or lacks the specific evidence needed for the slice narrative. Capture significant items with `capture_thought`; do not append knowledge files directly.
 11. Call `gsd_slice_complete`. The DB-backed tool is the canonical write path. Do **not** manually write `{{sliceSummaryPath}}`. Do **not** manually write `{{sliceUatPath}}`. Do not edit roadmap checkboxes; the tool renders files and updates projections.
 12. Do not run git commands.
 13. Update `.gsd/PROJECT.md` with a full `write` only if the current project state needs refresh.

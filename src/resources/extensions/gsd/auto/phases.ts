@@ -253,6 +253,85 @@ async function restorePreflightStashOrStop(
   return stopOnPostflightRecoveryNeeded(ic, result, milestoneId);
 }
 
+/**
+ * Run a milestone merge surrounded by preflight stash + always-on postflight
+ * pop. The previous code popped the stash only after a successful merge, which
+ * leaked `gsd-preflight-stash:M00x:*` entries whenever `mergeAndExit` threw —
+ * leaving the user's pre-merge working tree silently stashed away after a
+ * merge-conflict or other merge error. This helper restores the stash on
+ * every exit path, then surfaces the merge or stash failure (in priority
+ * order) as the loop's stop reason.
+ *
+ * Returns a `break` action when auto-mode must stop, or `null` when the merge
+ * succeeded and the stash (if any) was restored cleanly.
+ */
+export async function _runMilestoneMergeWithStashRestore(
+  ic: IterationContext,
+  milestoneId: string,
+): Promise<{ action: "break"; reason: string } | null> {
+  const { ctx, pi, s, deps } = ic;
+
+  const preflight = deps.preflightCleanRoot(
+    s.originalBasePath || s.basePath,
+    milestoneId,
+    ctx.ui.notify.bind(ctx.ui),
+  );
+
+  let mergeError: unknown = null;
+  try {
+    deps.resolver.mergeAndExit(milestoneId, ctx.ui);
+    s.milestoneMergedInPhases = true;
+  } catch (mergeErr) {
+    mergeError = mergeErr;
+  }
+
+  // Always attempt to restore the stashed working tree, even on merge error.
+  // postflightPopStash itself does not throw; failures surface via the
+  // PostflightResult.needsManualRecovery flag.
+  let stashResult: PostflightResult | null = null;
+  if (preflight.stashPushed) {
+    stashResult = deps.postflightPopStash(
+      s.originalBasePath || s.basePath,
+      milestoneId,
+      preflight.stashMarker,
+      ctx.ui.notify.bind(ctx.ui),
+    );
+  }
+
+  // Merge failure takes priority over stash recovery — the merge is the
+  // authoritative gate. If the stash also needed manual recovery, the user
+  // already saw the postflightPopStash notify above.
+  if (mergeError) {
+    if (mergeError instanceof MergeConflictError) {
+      ctx.ui.notify(
+        `Merge conflict: ${mergeError.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`,
+        "error",
+      );
+      await deps.stopAuto(ctx, pi, `Merge conflict on milestone ${milestoneId}`);
+      return { action: "break", reason: "merge-conflict" };
+    }
+    logError("engine", "Milestone merge failed with non-conflict error", {
+      milestone: milestoneId,
+      error: String(mergeError),
+    });
+    ctx.ui.notify(
+      `Merge failed: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}. Resolve and run /gsd auto to resume.`,
+      "error",
+    );
+    await deps.stopAuto(
+      ctx,
+      pi,
+      `Merge error on milestone ${milestoneId}: ${String(mergeError)}`,
+    );
+    return { action: "break", reason: "merge-failed" };
+  }
+
+  if (stashResult) {
+    return stopOnPostflightRecoveryNeeded(ic, stashResult, milestoneId);
+  }
+  return null;
+}
+
 async function emitCancelledUnitEnd(
   ic: IterationContext,
   unitType: string,
@@ -689,44 +768,11 @@ export async function runPreDispatch(
     loopState.recentUnits.length = 0;
     loopState.stuckRecoveryAttempts = 0;
 
-    // Worktree lifecycle on milestone transition — merge current, enter next
-    // #2909: preflight — warn + stash dirty working tree before merge
-    const preflightTransition = deps.preflightCleanRoot(
-      s.originalBasePath || s.basePath,
-      s.currentMilestoneId!,
-      ctx.ui.notify.bind(ctx.ui),
-    );
-    try {
-      deps.resolver.mergeAndExit(s.currentMilestoneId!, ctx.ui);
-      // Prevent stopAuto() from attempting the same merge again if postflight recovery stops here.
-      s.milestoneMergedInPhases = true;
-    } catch (mergeErr) {
-      if (mergeErr instanceof MergeConflictError) {
-        // Real code conflicts — stop the loop instead of retrying forever (#2330)
-        ctx.ui.notify(
-          `Merge conflict: ${mergeErr.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`,
-          "error",
-        );
-        await deps.stopAuto(ctx, pi, `Merge conflict on milestone ${s.currentMilestoneId}`);
-        return { action: "break", reason: "merge-conflict" };
-      }
-      // Non-conflict merge errors — stop auto to avoid advancing with unmerged work
-      logError("engine", "Milestone merge failed with non-conflict error", { milestone: s.currentMilestoneId!, error: String(mergeErr) });
-      ctx.ui.notify(
-        `Merge failed: ${mergeErr instanceof Error ? mergeErr.message : String(mergeErr)}. Resolve and run /gsd auto to resume.`,
-        "error",
-      );
-      await deps.stopAuto(ctx, pi, `Merge error on milestone ${s.currentMilestoneId}: ${String(mergeErr)}`);
-      return { action: "break", reason: "merge-failed" };
-    }
-    // #2909: postflight — restore stashed changes after successful merge
+    // Worktree lifecycle on milestone transition — merge current, enter next.
+    // #2909 / #5538-followup: preflight stash + always-on postflight pop.
     {
-      const postflightStop = await restorePreflightStashOrStop(
-        ic,
-        preflightTransition,
-        s.currentMilestoneId!,
-      );
-      if (postflightStop) return postflightStop;
+      const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId!);
+      if (stop) return stop;
     }
 
     // PR creation (auto_pr) is handled inside mergeMilestoneToMain (#2302)
@@ -804,45 +850,11 @@ export async function runPreDispatch(
         m.status !== "complete" && m.status !== "parked",
     );
     if (incomplete.length === 0 && state.registry.length > 0) {
-      // All milestones complete — merge milestone branch before stopping
+      // All milestones complete — merge milestone branch before stopping.
       if (s.currentMilestoneId) {
-        // #2909: preflight — warn + stash dirty working tree before merge
-        const preflightAllComplete = deps.preflightCleanRoot(
-          s.originalBasePath || s.basePath,
-          s.currentMilestoneId,
-          ctx.ui.notify.bind(ctx.ui),
-        );
-        try {
-          deps.resolver.mergeAndExit(s.currentMilestoneId, ctx.ui);
-          // Prevent stopAuto from attempting the same merge (#2645)
-          s.milestoneMergedInPhases = true;
-        } catch (mergeErr) {
-          if (mergeErr instanceof MergeConflictError) {
-            ctx.ui.notify(
-              `Merge conflict: ${mergeErr.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`,
-              "error",
-            );
-            await deps.stopAuto(ctx, pi, `Merge conflict on milestone ${s.currentMilestoneId}`);
-            return { action: "break", reason: "merge-conflict" };
-          }
-          logError("engine", "Milestone merge failed with non-conflict error", { milestone: s.currentMilestoneId!, error: String(mergeErr) });
-          ctx.ui.notify(
-            `Merge failed: ${mergeErr instanceof Error ? mergeErr.message : String(mergeErr)}. Resolve and run /gsd auto to resume.`,
-            "error",
-          );
-          await deps.stopAuto(ctx, pi, `Merge error on milestone ${s.currentMilestoneId}: ${String(mergeErr)}`);
-          return { action: "break", reason: "merge-failed" };
-        }
-        // #2909: postflight — restore stashed changes after successful merge
-        {
-          const postflightStop = await restorePreflightStashOrStop(
-            ic,
-            preflightAllComplete,
-            s.currentMilestoneId,
-          );
-          if (postflightStop) return postflightStop;
-        }
-
+        // #2909 / #5538-followup: preflight stash + always-on postflight pop.
+        const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId);
+        if (stop) return stop;
         // PR creation (auto_pr) is handled inside mergeMilestoneToMain (#2302)
       }
       deps.sendDesktopNotification(
@@ -933,45 +945,11 @@ export async function runPreDispatch(
 
   // Terminal: complete
   if (state.phase === "complete") {
-    // Milestone merge on complete (before closeout so branch state is clean)
+    // Milestone merge on complete (before closeout so branch state is clean).
     if (s.currentMilestoneId) {
-      // #2909: preflight — warn + stash dirty working tree before merge
-      const preflightComplete = deps.preflightCleanRoot(
-        s.originalBasePath || s.basePath,
-        s.currentMilestoneId,
-        ctx.ui.notify.bind(ctx.ui),
-      );
-      try {
-        deps.resolver.mergeAndExit(s.currentMilestoneId, ctx.ui);
-        // Prevent stopAuto from attempting the same merge (#2645)
-        s.milestoneMergedInPhases = true;
-      } catch (mergeErr) {
-        if (mergeErr instanceof MergeConflictError) {
-          ctx.ui.notify(
-            `Merge conflict: ${mergeErr.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`,
-            "error",
-          );
-          await deps.stopAuto(ctx, pi, `Merge conflict on milestone ${s.currentMilestoneId}`);
-          return { action: "break", reason: "merge-conflict" };
-        }
-        logError("engine", "Milestone merge failed with non-conflict error", { milestone: s.currentMilestoneId!, error: String(mergeErr) });
-        ctx.ui.notify(
-          `Merge failed: ${mergeErr instanceof Error ? mergeErr.message : String(mergeErr)}. Resolve and run /gsd auto to resume.`,
-          "error",
-        );
-        await deps.stopAuto(ctx, pi, `Merge error on milestone ${s.currentMilestoneId}: ${String(mergeErr)}`);
-        return { action: "break", reason: "merge-failed" };
-      }
-      // #2909: postflight — restore stashed changes after successful merge
-      {
-        const postflightStop = await restorePreflightStashOrStop(
-          ic,
-          preflightComplete,
-          s.currentMilestoneId,
-        );
-        if (postflightStop) return postflightStop;
-      }
-
+      // #2909 / #5538-followup: preflight stash + always-on postflight pop.
+      const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId);
+      if (stop) return stop;
       // PR creation (auto_pr) is handled inside mergeMilestoneToMain (#2302)
     }
     deps.sendDesktopNotification(
