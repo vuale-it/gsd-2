@@ -423,6 +423,22 @@ export function isClaudeCodeAbortErrorMessage(message: string | undefined | null
 	return /\b(?:claude code process aborted by user|request aborted by user|process aborted by user)\b/i.test(message);
 }
 
+function isBareClaudeCodeAbortErrorMessage(message: string | undefined | null): boolean {
+	if (!message) return false;
+	const normalized = message.trim().replace(/\s+/g, " ").toLowerCase();
+	return normalized === "claude code process aborted by user"
+		|| normalized === "request aborted by user"
+		|| normalized === "process aborted by user";
+}
+
+export function resolveClaudeCodeAbortedMessageText(errorMsg: string, lastTextContent: string): string {
+	const trimmedError = errorMsg.trim();
+	if (trimmedError && !isBareClaudeCodeAbortErrorMessage(trimmedError)) {
+		return trimmedError;
+	}
+	return lastTextContent;
+}
+
 /**
  * Generator exhaustion without a terminal result means the SDK stream was
  * interrupted mid-turn. Surface it as an error so downstream recovery logic
@@ -1846,10 +1862,11 @@ async function pumpSdkMessages(
 	} catch (err) {
 		const errorMsg = err instanceof Error ? err.message : String(err);
 		if (options?.signal?.aborted || isClaudeCodeAbortErrorMessage(errorMsg)) {
+			const abortedText = resolveClaudeCodeAbortedMessageText(errorMsg, lastTextContent);
 			stream.push({
 				type: "error",
 				reason: "aborted",
-				error: makeAbortedMessage(modelId, lastTextContent),
+				error: makeAbortedMessage(modelId, abortedText),
 			});
 			return;
 		}

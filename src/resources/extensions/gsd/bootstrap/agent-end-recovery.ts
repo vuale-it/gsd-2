@@ -82,6 +82,15 @@ export function isUserInitiatedAbortMessage(message: string | undefined | null):
   return /\b(?:claude code process aborted by user|request aborted by user|process aborted by user)\b/i.test(message);
 }
 
+function isBareClaudeCodeSessionSwitchAbortMarker(message: string | undefined | null): boolean {
+  if (!message) return false;
+  const normalized = message.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized === "claude code process aborted by user"
+    || normalized === "request aborted by user"
+    || normalized === "process aborted by user"
+    || normalized === "claude code stream aborted by caller";
+}
+
 function readAssistantTextContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
@@ -97,19 +106,13 @@ function readAssistantTextContent(content: unknown): string {
 export function isClaudeCodeSessionSwitchAbortMessage(lastMsg: unknown): boolean {
   if (!lastMsg || typeof lastMsg !== "object") return false;
   const m = lastMsg as { stopReason?: unknown; errorMessage?: unknown; content?: unknown };
-  const rawErrorMsg = m.errorMessage ? String(m.errorMessage) : "";
-  const textContent = readAssistantTextContent(m.content);
-  const hasUserAbortText =
-    isUserInitiatedAbortMessage(rawErrorMsg) ||
-    isUserInitiatedAbortMessage(textContent);
+  const carriers = [
+    m.errorMessage ? String(m.errorMessage) : "",
+    readAssistantTextContent(m.content),
+  ].filter((value) => value.trim().length > 0);
 
-  if (m.stopReason === "error") {
-    return hasUserAbortText;
-  }
-
-  if (m.stopReason === "aborted") {
-    if (rawErrorMsg && !isUserInitiatedAbortMessage(rawErrorMsg)) return false;
-    return hasUserAbortText || textContent.trim() === "Claude Code stream aborted by caller";
+  if ((m.stopReason === "error" || m.stopReason === "aborted") && carriers.length > 0) {
+    return carriers.every(isBareClaudeCodeSessionSwitchAbortMarker);
   }
 
   return false;
@@ -147,7 +150,7 @@ export function _handleSessionSwitchAgentEnd(
 
   if (m.stopReason === "error") {
     const rawErrorMsg = m.errorMessage ? String(m.errorMessage) : "";
-    if (isUserInitiatedAbortMessage(rawErrorMsg)) {
+    if (isBareClaudeCodeSessionSwitchAbortMarker(rawErrorMsg)) {
       // Internal abort from in-flight session transition — drop on the floor.
       return;
     }

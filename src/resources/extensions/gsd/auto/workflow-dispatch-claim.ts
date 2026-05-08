@@ -9,6 +9,16 @@ export type DispatchClaimOutcome =
   | { kind: "skip"; reason: "already-active" | "stale-lease"; existingId?: number; existingWorker?: string }
   | { kind: "degraded" };
 
+export type DispatchLeaseOutcome =
+  | { kind: "ready"; token: number; recovered: boolean }
+  | { kind: "degraded"; reason: "missing-worker" | "missing-milestone" }
+  | { kind: "blocked"; reason: string }
+  | { kind: "failed"; reason: string };
+
+type ClaimMilestoneLeaseResult =
+  | { ok: true; token: number; expiresAt: string }
+  | { ok: false; error: "held_by"; byWorker: string; expiresAt: string };
+
 interface RecentDispatch {
   attempt_n?: number | null;
 }
@@ -44,6 +54,58 @@ export interface OpenDispatchClaimDeps {
   logClaimFailed: (err: unknown) => void;
 }
 
+export interface EnsureDispatchLeaseDeps {
+  claimMilestoneLease: (workerId: string, milestoneId: string) => ClaimMilestoneLeaseResult;
+  logLeaseRecovered: (details: {
+    milestoneId: string;
+    workerId: string;
+    token: number;
+    recovered: boolean;
+  }) => void;
+  logLeaseRecoveryFailed: (details: {
+    milestoneId?: string;
+    workerId?: string;
+    reason: string;
+  }) => void;
+}
+
+export function ensureDispatchLease(
+  s: AutoSession,
+  milestoneId: string | undefined,
+  deps: EnsureDispatchLeaseDeps,
+  opts: { forceReclaim?: boolean } = {},
+): DispatchLeaseOutcome {
+  if (!s.workerId) return { kind: "degraded", reason: "missing-worker" };
+  if (!milestoneId) return { kind: "degraded", reason: "missing-milestone" };
+  if (!opts.forceReclaim && typeof s.milestoneLeaseToken === "number") {
+    return { kind: "ready", token: s.milestoneLeaseToken, recovered: false };
+  }
+
+  s.milestoneLeaseToken = null;
+  try {
+    const claim = deps.claimMilestoneLease(s.workerId, milestoneId);
+    if (!claim.ok) {
+      const reason = `Milestone ${milestoneId} is held by worker ${claim.byWorker} until ${claim.expiresAt}.`;
+      deps.logLeaseRecoveryFailed({ milestoneId, workerId: s.workerId, reason });
+      return { kind: "blocked", reason };
+    }
+
+    s.currentMilestoneId = milestoneId;
+    s.milestoneLeaseToken = claim.token;
+    deps.logLeaseRecovered({
+      milestoneId,
+      workerId: s.workerId,
+      token: claim.token,
+      recovered: opts.forceReclaim === true,
+    });
+    return { kind: "ready", token: claim.token, recovered: opts.forceReclaim === true };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    deps.logLeaseRecoveryFailed({ milestoneId, workerId: s.workerId, reason });
+    return { kind: "failed", reason };
+  }
+}
+
 export function openDispatchClaim(
   s: AutoSession,
   flowId: string,
@@ -51,7 +113,7 @@ export function openDispatchClaim(
   iterData: IterationData,
   deps: OpenDispatchClaimDeps,
 ): DispatchClaimOutcome {
-  if (!s.workerId || s.milestoneLeaseToken === null) return { kind: "degraded" };
+  if (!s.workerId || typeof s.milestoneLeaseToken !== "number") return { kind: "degraded" };
   const mid = iterData.mid;
   if (!mid) return { kind: "degraded" };
 

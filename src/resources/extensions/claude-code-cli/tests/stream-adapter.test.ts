@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import {
 	makeStreamExhaustedErrorMessage,
 	isClaudeCodeAbortErrorMessage,
+	resolveClaudeCodeAbortedMessageText,
 	getResultErrorMessage,
 	makeAbortedMessage,
 	mergePendingToolCalls,
@@ -1235,6 +1236,24 @@ describe("stream-adapter — abort classification (F2)", () => {
 		const exhausted = makeStreamExhaustedErrorMessage("claude-sonnet-4-6", "");
 		assert.notEqual(aborted.stopReason, exhausted.stopReason);
 		assert.equal(exhausted.errorMessage, "stream_exhausted_without_result");
+	});
+
+	test("abort catch preserves SDK diagnostic text instead of partial output", () => {
+		const text = resolveClaudeCodeAbortedMessageText(
+			"Request aborted by user\nAPI Error: 529 overloaded",
+			"partial mid-stream text",
+		);
+
+		assert.equal(text, "Request aborted by user\nAPI Error: 529 overloaded");
+	});
+
+	test("abort catch falls back to partial output for bare abort markers", () => {
+		const text = resolveClaudeCodeAbortedMessageText(
+			"Request aborted by user",
+			"partial mid-stream text",
+		);
+
+		assert.equal(text, "partial mid-stream text");
 	});
 });
 

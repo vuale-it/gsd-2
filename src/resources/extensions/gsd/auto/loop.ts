@@ -38,7 +38,7 @@ import {
   getRecentForUnit as getRecentDispatchesForUnit,
   getRecentUnitKeysForProjectRoot,
 } from "../db/unit-dispatches.js";
-import { refreshMilestoneLease } from "../db/milestone-leases.js";
+import { claimMilestoneLease, refreshMilestoneLease } from "../db/milestone-leases.js";
 import { heartbeatAutoWorker } from "../db/auto-workers.js";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.js";
 import { resolveUokFlags } from "../uok/flags.js";
@@ -70,7 +70,7 @@ import {
 } from "./workflow-dispatch-ledger.js";
 import { emitOpenUnitEndForUnit } from "../crash-recovery.js";
 import { writeUnitRuntimeRecord } from "../unit-runtime.js";
-import { openDispatchClaim } from "./workflow-dispatch-claim.js";
+import { ensureDispatchLease, openDispatchClaim } from "./workflow-dispatch-claim.js";
 import { completeWorkflowIteration } from "./workflow-iteration-completion.js";
 import { createWorkflowJournalReporter } from "./workflow-journal-reporter.js";
 import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
@@ -162,6 +162,29 @@ function logDispatchClaimFailed(err: unknown): void {
   debugLog("autoLoop", {
     phase: "dispatch-claim-failed",
     error: err instanceof Error ? err.message : String(err),
+  });
+}
+
+function logDispatchLeaseRecovered(details: {
+  milestoneId: string;
+  workerId: string;
+  token: number;
+  recovered: boolean;
+}): void {
+  debugLog("autoLoop", {
+    phase: details.recovered ? "dispatch-lease-recovered" : "dispatch-lease-acquired",
+    ...details,
+  });
+}
+
+function logDispatchLeaseRecoveryFailed(details: {
+  milestoneId?: string;
+  workerId?: string;
+  reason: string;
+}): void {
+  debugLog("autoLoop", {
+    phase: "dispatch-lease-recovery-failed",
+    ...details,
   });
 }
 
@@ -273,6 +296,10 @@ export async function autoLoop(
       logHeartbeatFailure: err => debugLog("autoLoop", {
         phase: "heartbeat-failed",
         error: err instanceof Error ? err.message : String(err),
+      }),
+      logLeaseRefreshMiss: details => debugLog("autoLoop", {
+        phase: "lease-refresh-missed",
+        ...details,
       }),
     });
 
@@ -703,25 +730,74 @@ export async function autoLoop(
 
       // Phase B: claim a unit_dispatches row before invoking the unit. The
       // partial unique index idx_unit_dispatches_active_per_unit prevents
-      // a second worker from claiming the same unit concurrently. Returns
-      // null when DB unavailable, no worker registered, or no active lease
-      // — those degraded paths fall through to the existing single-worker
-      // semantics with no ledger entry, preserving back-compat.
-      const dispatchClaim = openDispatchClaim(s, flowId, turnId, iterData, {
+      // a second worker from claiming the same unit concurrently. When this
+      // process has a worker identity, make the milestone lease explicit before
+      // claiming so a step-mode handoff cannot leave us running with a stale
+      // in-memory token and no backing lease row.
+      const leaseBeforeClaim = ensureDispatchLease(s, iterData.mid, {
+        claimMilestoneLease,
+        logLeaseRecovered: logDispatchLeaseRecovered,
+        logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
+      });
+      if (leaseBeforeClaim.kind === "blocked" || leaseBeforeClaim.kind === "failed") {
+        const msg = `Lost milestone lease for ${iterData.mid ?? "unknown"} before dispatching ${iterData.unitType} ${iterData.unitId}: ${leaseBeforeClaim.reason}`;
+        ctx.ui.notify(msg, "error");
+        finishTurn("stopped", "execution", msg);
+        await deps.stopAuto(ctx, pi, msg);
+        break;
+      }
+
+      let dispatchClaim = openDispatchClaim(s, flowId, turnId, iterData, {
         getRecentDispatchesForUnit,
         recordDispatchClaim,
         markDispatchRunning,
         logClaimRejected: logDispatchClaimRejected,
         logClaimFailed: logDispatchClaimFailed,
       });
-      const dispatchDecision = decideDispatchClaim(
+      let dispatchDecision = decideDispatchClaim(
         dispatchClaim.kind === "opened"
           ? { kind: "opened", dispatchId: dispatchClaim.dispatchId }
           : dispatchClaim.kind === "skip"
             ? { kind: "skip", reason: dispatchClaim.reason }
             : { kind: "degraded" },
       );
+      if (dispatchDecision.action === "skip" && dispatchDecision.reason === "stale-lease") {
+        const leaseRecovery = ensureDispatchLease(s, iterData.mid, {
+          claimMilestoneLease,
+          logLeaseRecovered: logDispatchLeaseRecovered,
+          logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
+        }, { forceReclaim: true });
+        if (leaseRecovery.kind === "ready") {
+          dispatchClaim = openDispatchClaim(s, flowId, turnId, iterData, {
+            getRecentDispatchesForUnit,
+            recordDispatchClaim,
+            markDispatchRunning,
+            logClaimRejected: logDispatchClaimRejected,
+            logClaimFailed: logDispatchClaimFailed,
+          });
+          dispatchDecision = decideDispatchClaim(
+            dispatchClaim.kind === "opened"
+              ? { kind: "opened", dispatchId: dispatchClaim.dispatchId }
+              : dispatchClaim.kind === "skip"
+                ? { kind: "skip", reason: dispatchClaim.reason }
+                : { kind: "degraded" },
+          );
+        } else {
+          const msg = `Lost milestone lease for ${iterData.mid ?? "unknown"} while claiming ${iterData.unitType} ${iterData.unitId}: ${leaseRecovery.reason}`;
+          ctx.ui.notify(msg, "error");
+          finishTurn("stopped", "execution", msg);
+          await deps.stopAuto(ctx, pi, msg);
+          break;
+        }
+      }
       if (dispatchDecision.action === "skip") {
+        if (dispatchDecision.reason === "stale-lease") {
+          const msg = `Lost milestone lease for ${iterData.mid ?? "unknown"} while claiming ${iterData.unitType} ${iterData.unitId}; dispatch claim still failed after recovery.`;
+          ctx.ui.notify(msg, "error");
+          finishTurn("stopped", "execution", msg);
+          await deps.stopAuto(ctx, pi, msg);
+          break;
+        }
         finishTurn("skipped", "execution", dispatchDecision.reason);
         continue;
       }

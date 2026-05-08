@@ -83,7 +83,7 @@ test("Claude Code session-switch abort detection is narrow", () => {
       stopReason: "error",
       content: [{ type: "text", text: "Claude Code error: Claude Code process aborted by user" }],
     }),
-    true,
+    false,
   );
   assert.equal(
     isClaudeCodeSessionSwitchAbortMessage({
@@ -98,6 +98,21 @@ test("Claude Code session-switch abort detection is narrow", () => {
       content: [{ type: "text", text: "partial output before network failure" }],
     }),
     false,
+  );
+  assert.equal(
+    isClaudeCodeSessionSwitchAbortMessage({
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Request aborted by user\nAPI Error: 529 overloaded" }],
+    }),
+    false,
+  );
+  assert.equal(
+    isClaudeCodeSessionSwitchAbortMessage({
+      stopReason: "error",
+      errorMessage: "Request aborted by user",
+      content: [{ type: "text", text: "Claude Code process aborted by user" }],
+    }),
+    true,
   );
 });
 
