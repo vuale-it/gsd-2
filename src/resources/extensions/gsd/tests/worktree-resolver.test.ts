@@ -529,6 +529,42 @@ test("exitMilestone commits, tears down, and resets basePath", () => {
   assert.equal(findCalls(deps.calls, "invalidateAllCaches").length, 1);
 });
 
+test("exitMilestone moves cwd to project root before teardown", (t) => {
+  const originalCwd = process.cwd();
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-exit-cwd-")));
+  const wtPath = join(base, ".gsd", "worktrees", "M001");
+  mkdirSync(wtPath, { recursive: true });
+  t.after(() => {
+    process.chdir(originalCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  process.chdir(wtPath);
+  const s = makeSession({
+    basePath: wtPath,
+    originalBasePath: base,
+  });
+  const deps = makeDeps({
+    isInAutoWorktree: () => true,
+  });
+  deps.teardownAutoWorktree = (
+    teardownBasePath: string,
+    milestoneId: string,
+    opts?: { preserveBranch?: boolean },
+  ) => {
+    deps.calls.push({ fn: "teardownAutoWorktree", args: [teardownBasePath, milestoneId, opts] });
+    assert.equal(process.cwd(), base);
+    rmSync(wtPath, { recursive: true, force: true });
+  };
+  const ctx = makeNotifyCtx();
+  const resolver = new WorktreeResolver(s, deps);
+
+  resolver.exitMilestone("M001", ctx);
+
+  assert.equal(process.cwd(), base);
+  assert.equal(s.basePath, base);
+});
+
 test("exitMilestone is no-op when not in worktree", () => {
   const s = makeSession();
   const deps = makeDeps({

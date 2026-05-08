@@ -476,19 +476,47 @@ export class WorktreeResolver {
         phase: "auto-commit-failed",
         error: err instanceof Error ? err.message : String(err),
       });
+      ctx.notify(
+        `Auto-commit before exiting ${milestoneId} failed: ${err instanceof Error ? err.message : String(err)}. Branch ${this.deps.autoWorktreeBranch(milestoneId)} is preserved for recovery.`,
+        "warning",
+      );
     }
 
+    if (this.s.originalBasePath) {
+      try {
+        process.chdir(this.s.originalBasePath);
+      } catch (err) {
+        debugLog("WorktreeResolver", {
+          action: "exitMilestone",
+          milestoneId,
+          phase: "pre-teardown-chdir-failed",
+          originalBasePath: this.s.originalBasePath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        ctx.notify(
+          `Could not leave milestone worktree before cleanup: ${err instanceof Error ? err.message : String(err)}. Branch ${this.deps.autoWorktreeBranch(milestoneId)} is preserved for recovery.`,
+          "warning",
+        );
+      }
+    }
+
+    let teardownFailed = false;
     try {
       this.deps.teardownAutoWorktree(this.s.originalBasePath, milestoneId, {
         preserveBranch: opts?.preserveBranch ?? false,
       });
     } catch (err) {
+      teardownFailed = true;
       debugLog("WorktreeResolver", {
         action: "exitMilestone",
         milestoneId,
         phase: "teardown-failed",
         error: err instanceof Error ? err.message : String(err),
       });
+      ctx.notify(
+        `Worktree cleanup failed for ${milestoneId}: ${err instanceof Error ? err.message : String(err)}. Branch ${this.deps.autoWorktreeBranch(milestoneId)} is preserved for recovery.`,
+        "warning",
+      );
     }
 
     this.restoreToProjectRoot();
@@ -498,7 +526,12 @@ export class WorktreeResolver {
       result: "done",
       basePath: this.s.basePath,
     });
-    ctx.notify(`Exited worktree for ${milestoneId}`, "info");
+    ctx.notify(
+      teardownFailed
+        ? `Worktree exit for ${milestoneId} needs manual cleanup.`
+        : `Exited worktree for ${milestoneId}`,
+      teardownFailed ? "warning" : "info",
+    );
   }
 
   // ── Merge and Exit ─────────────────────────────────────────────────────

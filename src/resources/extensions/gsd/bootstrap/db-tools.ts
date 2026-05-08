@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { Text } from "@gsd/pi-tui";
 
 import { loadEffectiveGSDPreferences } from "../preferences.js";
-import { ensureDbOpen } from "./dynamic-tools.js";
+import { ensureDbOpen, safeWorkspaceCwd } from "./dynamic-tools.js";
 import { loadWriteGateSnapshot, shouldBlockRootArtifactSaveInSnapshot } from "./write-gate.js";
 import { StringEnum } from "@gsd/pi-ai";
 import { logError } from "../workflow-logger.js";
@@ -20,7 +20,7 @@ function toolWorkspaceRoot(ctx: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 /**

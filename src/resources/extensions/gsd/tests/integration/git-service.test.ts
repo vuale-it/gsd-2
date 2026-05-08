@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Git service integration and commit-message tests.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, readFileSync } from "node:fs";
@@ -211,7 +213,12 @@ describe('git-service', async () => {
   test('buildTaskCommitMessage', () => {
     const msg = buildTaskCommitMessage({
       taskId: "S01/T02",
+      taskDisplayId: "T02",
       taskTitle: "implement user authentication",
+      milestoneId: "M001",
+      milestoneTitle: "User management",
+      sliceId: "S01",
+      sliceTitle: "Authentication",
       oneLiner: "Added JWT-based auth with refresh token rotation",
       keyFiles: ["src/auth.ts", "src/middleware/jwt.ts"],
     });
@@ -220,7 +227,12 @@ describe('git-service', async () => {
     assert.ok(msg.includes("JWT-based auth"), "message includes one-liner content");
     assert.ok(msg.includes("- src/auth.ts"), "message body includes key files");
     assert.ok(msg.includes("- src/middleware/jwt.ts"), "message body includes second key file");
+    assert.ok(msg.includes("GSD context:"), "message includes human GSD context block");
+    assert.ok(msg.includes("- Milestone: M001 - User management"), "message includes milestone name");
+    assert.ok(msg.includes("- Slice: S01 - Authentication"), "message includes slice name");
+    assert.ok(msg.includes("- Task: T02 - implement user authentication"), "message includes task name");
     assert.ok(msg.includes("GSD-Task: S01/T02"), "GSD-Task trailer in body");
+    assert.ok(!msg.includes("chore: auto-commit after execute-task"), "message does not use generic fallback");
   });
 
   test('buildTaskCommitMessage sanitizes subject text', () => {

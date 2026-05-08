@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Registers Context Mode execution tools.
 // GSD2 — Exec (context-mode) tool registration.
 //
 // Exposes the Context Mode runtime tools in-process. Default-on; opt out with
@@ -6,11 +8,13 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
+import { safeWorkspaceCwd } from "./dynamic-tools.js";
+
 function toolWorkspaceRoot(ctx: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 async function loadContextModePreferences(baseDir: string) {

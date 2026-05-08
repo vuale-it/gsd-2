@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Auto-mode bootstrap, worktree recovery, and fresh-start initialization.
 /**
  * Auto-mode bootstrap — fresh-start initialization path.
  *
@@ -103,6 +105,16 @@ export interface BootstrapDeps {
   buildResolver: () => WorktreeResolver;
 }
 
+export function resolveIsolationNoneBranchCheckout(
+  currentBranch: string,
+  integrationBranch: string,
+  isolationMode: string,
+  isRepo: boolean,
+): string | null {
+  if (!isRepo || isolationMode !== "none") return null;
+  return currentBranch.startsWith("milestone/") ? integrationBranch : null;
+}
+
 /**
  * Bootstrap a fresh auto-mode session. Handles everything from git init
  * through secrets collection, returning when ready for the first
@@ -115,6 +127,18 @@ export interface BootstrapDeps {
 // Guard constant for consecutive bootstrap attempts that found phase === "complete".
 // Counter moved to AutoSession.consecutiveCompleteBootstraps so s.reset() clears it.
 const MAX_CONSECUTIVE_COMPLETE_BOOTSTRAPS = 2;
+
+export function hasGitIndexLockForTest(basePath: string): boolean {
+  return existsSync(join(basePath, ".git", "index.lock"));
+}
+
+export function _shouldAbortBootstrapForUnavailableDbForTest(
+  gsdDbPath: string,
+  dbAvailable: boolean,
+  pathExists: (path: string) => boolean = existsSync,
+): boolean {
+  return pathExists(gsdDbPath) && !dbAvailable;
+}
 
 export async function openProjectDbIfPresent(basePath: string): Promise<void> {
   const gsdDbPath = resolveProjectRootDbPath(basePath);
@@ -876,7 +900,25 @@ export async function bootstrapAutoSession(
     {
       const orphan = findUnmergedCompletedMilestone(base, getIsolationMode(base));
       if (orphan && orphan !== state.activeMilestone?.id) {
+        const priorBasePath = s.basePath;
+        const priorOriginalBasePath = s.originalBasePath;
+        s.originalBasePath = base;
+        s.basePath = getAutoWorktreePath(base, orphan) ?? base;
         const result = _mergeOrphanCompletedMilestone(buildResolver(), orphan, ctx.ui);
+        if (!result.merged) {
+          s.basePath = base;
+          s.originalBasePath = base;
+          try {
+            process.chdir(base);
+          } catch (err) {
+            logWarning("bootstrap", `could not restore cwd after orphan merge failure: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return releaseLockAndReturn();
+        }
+        if (!s.active) {
+          s.basePath = priorBasePath || base;
+          s.originalBasePath = priorOriginalBasePath || base;
+        }
         if (result.merged) {
           invalidateAllCaches();
           state = await deriveState(base);
@@ -1030,13 +1072,21 @@ export async function bootstrapAutoSession(
     // Guard against stale milestone branch when isolation:none (#3613).
     // A prior session with isolation:branch/worktree may have left HEAD on
     // milestone/<MID>. Auto-checkout back to the integration branch.
-    if (getIsolationMode(base) === "none" && nativeIsRepo(base)) {
+    const isolationMode = getIsolationMode(base);
+    const isRepo = nativeIsRepo(base);
+    if (isolationMode === "none" && isRepo) {
       try {
         const currentBranch = nativeGetCurrentBranch(base);
-        if (currentBranch.startsWith("milestone/")) {
-          const integrationBranch = nativeDetectMainBranch(base);
-          nativeCheckoutBranch(base, integrationBranch);
-          logWarning("bootstrap", `Returned to "${integrationBranch}" — HEAD was on stale milestone branch "${currentBranch}" (isolation: none does not use milestone branches).`);
+        const integrationBranch = nativeDetectMainBranch(base);
+        const branchToCheckout = resolveIsolationNoneBranchCheckout(
+          currentBranch,
+          integrationBranch,
+          isolationMode,
+          isRepo,
+        );
+        if (branchToCheckout) {
+          nativeCheckoutBranch(base, branchToCheckout);
+          logWarning("bootstrap", `Returned to "${branchToCheckout}" — HEAD was on stale milestone branch "${currentBranch}" (isolation: none does not use milestone branches).`);
         }
       } catch (err) {
         logWarning("bootstrap", `Could not auto-checkout from stale milestone branch: ${err instanceof Error ? err.message : String(err)}`);
@@ -1085,7 +1135,7 @@ export async function bootstrapAutoSession(
         logError("engine", `failed to initialize project database: ${(err as Error).message}`);
       }
     }
-    if (existsSync(gsdDbPath) && !isDbAvailable()) {
+    if (_shouldAbortBootstrapForUnavailableDbForTest(gsdDbPath, isDbAvailable())) {
       try {
         const { openDatabase: openDb } = await import("./gsd-db.js");
         openDb(gsdDbPath);

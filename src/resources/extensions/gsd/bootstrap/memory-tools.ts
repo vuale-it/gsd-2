@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Registers memory-layer tools.
 // GSD2 — Memory tool registration
 //
 // Exposes the memory-layer tools (capture_thought, memory_query, gsd_graph)
@@ -7,7 +9,7 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
-import { ensureDbOpen } from "./dynamic-tools.js";
+import { ensureDbOpen, safeWorkspaceCwd } from "./dynamic-tools.js";
 import {
   executeGsdGraph,
   executeMemoryCapture,
@@ -18,7 +20,7 @@ function toolWorkspaceRoot(ctx: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 export function registerMemoryTools(pi: ExtensionAPI): void {

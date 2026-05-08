@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Auto-mode post-unit git, verification, projection, and hook processing.
 /**
  * Post-unit processing for auto-loop — auto-commit, doctor run,
  * state rebuild, projection checks, DB tool closeout, hooks, triage, and
@@ -103,6 +105,67 @@ function formatPreExecutionCheckDetail(check: PreExecutionCheckJSON): string {
 const COMPLETE_MILESTONE_DB_SETTLE_MS = 1500;
 const COMPLETE_MILESTONE_DB_SETTLE_POLL_MS = 100;
 
+function stripKnownIdPrefix(value: string | undefined | null, id: string): string | undefined {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+  const lower = raw.toLowerCase();
+  const idLower = id.toLowerCase();
+  if (lower.startsWith(`${idLower}:`)) return raw.slice(id.length + 1).trim() || undefined;
+  return raw;
+}
+
+async function buildTaskCommitContextForUnit(
+  basePath: string,
+  unitId: string,
+): Promise<TaskCommitContext | undefined> {
+  const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
+  if (!mid || !sid || !tid) return undefined;
+
+  const milestone = isDbAvailable() ? getMilestone(mid) : null;
+  const slice = isDbAvailable() ? getSlice(mid, sid) : null;
+  const task = isDbAvailable() ? getTask(mid, sid, tid) : null;
+  let summary: ReturnType<typeof parseSummary> | null = null;
+
+  const summaryPath = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
+  if (summaryPath) {
+    try {
+      const summaryContent = await loadFile(summaryPath);
+      if (summaryContent) summary = parseSummary(summaryContent);
+    } catch (e) {
+      debugLog("postUnit", { phase: "task-summary-parse", error: String(e) });
+    }
+  }
+
+  if (!summary && !task) return undefined;
+
+  let ghIssueNumber: number | undefined;
+  try {
+    const { getTaskIssueNumberForCommit } = await import("../github-sync/sync.js");
+    ghIssueNumber = getTaskIssueNumberForCommit(basePath, mid, sid, tid) ?? undefined;
+  } catch (err) {
+    logWarning("engine", `GitHub issue lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return {
+    taskId: `${sid}/${tid}`,
+    taskDisplayId: tid,
+    taskTitle:
+      stripKnownIdPrefix(summary?.title, tid) ??
+      stripKnownIdPrefix(task?.title, tid) ??
+      tid,
+    milestoneId: mid,
+    milestoneTitle: stripKnownIdPrefix(milestone?.title, mid),
+    sliceId: sid,
+    sliceTitle: stripKnownIdPrefix(slice?.title, sid),
+    oneLiner: summary?.oneLiner || task?.one_liner || undefined,
+    keyFiles:
+      summary?.frontmatter.key_files?.filter(f => !f.includes("{{")) ??
+      task?.key_files ??
+      undefined,
+    issueNumber: ghIssueNumber,
+  };
+}
+
 async function waitForMilestoneDbClose(mid: string): Promise<boolean> {
   const deadline = Date.now() + COMPLETE_MILESTONE_DB_SETTLE_MS;
   while (Date.now() < deadline) {
@@ -134,6 +197,26 @@ function enqueueSidecar(
   if (notification) ctx.ui.notify(notification, "info");
   return "continue";
 }
+
+export function _shouldDispatchTriageForTest(
+  state: Pick<AutoSession, "stepMode" | "currentUnit">,
+): boolean {
+  return !state.stepMode &&
+    !!state.currentUnit &&
+    !state.currentUnit.type.startsWith("hook/") &&
+    state.currentUnit.type !== "triage-captures" &&
+    state.currentUnit.type !== "quick-task";
+}
+
+export function _shouldDispatchQuickTaskForTest(
+  state: Pick<AutoSession, "stepMode" | "currentUnit" | "pendingQuickTasks">,
+): boolean {
+  return !state.stepMode &&
+    state.pendingQuickTasks.length > 0 &&
+    !!state.currentUnit &&
+    state.currentUnit.type !== "quick-task";
+}
+
 /** Unit types that only touch `.gsd/` internal state files (no code changes).
  *  Auto-commit is skipped for these — their state files are picked up by the
  *  next actual task commit via `smartStage()`. */
@@ -276,7 +359,7 @@ export function detectRogueFileWrites(
  * in auto-verification.ts. Exceeding this limit pauses auto-mode instead of
  * looping indefinitely (#2007).
  */
-const MAX_ARTIFACT_VERIFICATION_RETRIES = 3;
+export const MAX_ARTIFACT_VERIFICATION_RETRIES = 3;
 
 export const STEP_COMPLETE_FALLBACK_MESSAGE =
   "Step complete. Run /clear, then /gsd to continue (or /gsd auto to run continuously).";
@@ -357,35 +440,7 @@ export async function autoCommitUnit(
     let taskContext: TaskCommitContext | undefined;
 
     if (unitType === "execute-task") {
-      const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
-      if (mid && sid && tid) {
-        const summaryPath = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-        if (summaryPath) {
-          try {
-            const summaryContent = await loadFile(summaryPath);
-            if (summaryContent) {
-              const summary = parseSummary(summaryContent);
-              let ghIssueNumber: number | undefined;
-              try {
-                const { getTaskIssueNumberForCommit } = await import("../github-sync/sync.js");
-                ghIssueNumber = getTaskIssueNumberForCommit(basePath, mid, sid, tid) ?? undefined;
-              } catch (err) {
-                logWarning("engine", `GitHub issue lookup failed: ${err instanceof Error ? err.message : String(err)}`);
-              }
-
-              taskContext = {
-                taskId: `${sid}/${tid}`,
-                taskTitle: summary.title?.replace(/^T\d+:\s*/, "") || tid,
-                oneLiner: summary.oneLiner || undefined,
-                keyFiles: summary.frontmatter.key_files?.filter(f => !f.includes("{{")) || undefined,
-                issueNumber: ghIssueNumber,
-              };
-            }
-          } catch (e) {
-            debugLog("postUnit", { phase: "task-summary-parse", error: String(e) });
-          }
-        }
-      }
+      taskContext = await buildTaskCommitContextForUnit(basePath, unitId);
     }
 
     _resetHasChangesCache();
@@ -457,37 +512,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       let taskContext: TaskCommitContext | undefined;
 
       if (turnAction === "commit" && s.currentUnit.type === "execute-task") {
-        const { milestone: mid, slice: sid, task: tid } = parseUnitId(s.currentUnit.id);
-        if (mid && sid && tid) {
-          const summaryPath = resolveTaskFile(s.basePath, mid, sid, tid, "SUMMARY");
-          if (summaryPath) {
-            try {
-              const summaryContent = await loadFile(summaryPath);
-              if (summaryContent) {
-                const summary = parseSummary(summaryContent);
-                // Look up GitHub issue number for commit linking
-                let ghIssueNumber: number | undefined;
-                try {
-                  const { getTaskIssueNumberForCommit } = await import("../github-sync/sync.js");
-                  ghIssueNumber = getTaskIssueNumberForCommit(s.basePath, mid, sid, tid) ?? undefined;
-                } catch (err) {
-                  // GitHub sync not available — skip
-                  logWarning("engine", `GitHub issue lookup failed: ${err instanceof Error ? err.message : String(err)}`);
-                }
-
-                taskContext = {
-                  taskId: `${sid}/${tid}`,
-                  taskTitle: summary.title?.replace(/^T\d+:\s*/, "") || tid,
-                  oneLiner: summary.oneLiner || undefined,
-                  keyFiles: summary.frontmatter.key_files?.filter(f => !f.includes("{{")) || undefined,
-                  issueNumber: ghIssueNumber,
-                };
-              }
-            } catch (e) {
-              debugLog("postUnit", { phase: "task-summary-parse", error: String(e) });
-            }
-          }
-        }
+        taskContext = await buildTaskCommitContextForUnit(s.basePath, s.currentUnit.id);
       }
 
       // Invalidate the nativeHasChanges cache before auto-commit (#1853).
@@ -1487,13 +1512,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   }
 
   // ── Triage check ──
-  if (
-    !s.stepMode &&
-    s.currentUnit &&
-    !s.currentUnit.type.startsWith("hook/") &&
-    s.currentUnit.type !== "triage-captures" &&
-    s.currentUnit.type !== "quick-task"
-  ) {
+  if (_shouldDispatchTriageForTest(s)) {
     try {
       if (hasPendingCaptures(s.basePath)) {
         const pending = loadPendingCaptures(s.basePath);
@@ -1541,12 +1560,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   }
 
   // ── Quick-task dispatch ──
-  if (
-    !s.stepMode &&
-    s.pendingQuickTasks.length > 0 &&
-    s.currentUnit &&
-    s.currentUnit.type !== "quick-task"
-  ) {
+  if (_shouldDispatchQuickTaskForTest(s)) {
     try {
       const capture = s.pendingQuickTasks.shift()!;
       const { buildQuickTaskPrompt } = await import("./triage-resolution.js");

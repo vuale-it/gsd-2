@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Auto-loop pipeline phases, merge closeout, and finalize handling.
 /**
  * auto/phases.ts — Pipeline phases for the auto-loop.
  *
@@ -126,8 +128,21 @@ const PLAN_V2_GATE_PHASES: ReadonlySet<Phase> = new Set([
   "completing-milestone",
 ]);
 
-function shouldRunPlanV2Gate(phase: Phase): boolean {
+export function shouldRunPlanV2Gate(phase: Phase): boolean {
   return PLAN_V2_GATE_PHASES.has(phase);
+}
+
+export function _shouldProceedWithInvalidRepoClassificationForTest(
+  reason: string | undefined,
+  hasGit: boolean,
+): boolean {
+  return reason === "missing .git" && hasGit;
+}
+
+export function _resolveCurrentUnitStartedAtForTest(
+  currentUnit: { startedAt: number } | null | undefined,
+): number | undefined {
+  return currentUnit?.startedAt;
 }
 
 /**
@@ -330,6 +345,21 @@ export async function _runMilestoneMergeWithStashRestore(
     return stopOnPostflightRecoveryNeeded(ic, stashResult, milestoneId);
   }
   return null;
+}
+
+export async function _runMilestoneMergeOnceWithStashRestore(
+  ic: IterationContext,
+  milestoneId: string,
+): Promise<{ action: "break"; reason: string } | null> {
+  if (ic.s.milestoneMergedInPhases) {
+    debugLog("autoLoop", {
+      phase: "milestone-merge-skip",
+      reason: "already-merged-in-phases",
+      milestoneId,
+    });
+    return null;
+  }
+  return _runMilestoneMergeWithStashRestore(ic, milestoneId);
 }
 
 async function emitCancelledUnitEnd(
@@ -771,7 +801,7 @@ export async function runPreDispatch(
     // Worktree lifecycle on milestone transition — merge current, enter next.
     // #2909 / #5538-followup: preflight stash + always-on postflight pop.
     {
-      const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId!);
+      const stop = await _runMilestoneMergeOnceWithStashRestore(ic, s.currentMilestoneId!);
       if (stop) return stop;
     }
 
@@ -853,7 +883,7 @@ export async function runPreDispatch(
       // All milestones complete — merge milestone branch before stopping.
       if (s.currentMilestoneId) {
         // #2909 / #5538-followup: preflight stash + always-on postflight pop.
-        const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId);
+        const stop = await _runMilestoneMergeOnceWithStashRestore(ic, s.currentMilestoneId);
         if (stop) return stop;
         // PR creation (auto_pr) is handled inside mergeMilestoneToMain (#2302)
       }
@@ -948,7 +978,7 @@ export async function runPreDispatch(
     // Milestone merge on complete (before closeout so branch state is clean).
     if (s.currentMilestoneId) {
       // #2909 / #5538-followup: preflight stash + always-on postflight pop.
-      const stop = await _runMilestoneMergeWithStashRestore(ic, s.currentMilestoneId);
+      const stop = await _runMilestoneMergeOnceWithStashRestore(ic, s.currentMilestoneId);
       if (stop) return stop;
       // PR creation (auto_pr) is handled inside mergeMilestoneToMain (#2302)
     }
@@ -1553,7 +1583,7 @@ export async function runUnitPhase(
     if (projectClassification.kind === "invalid-repo") {
       const msg = `Worktree health check failed: ${s.basePath} classified as invalid-repo (${projectClassification.reason}) — refusing to dispatch ${unitType} ${unitId}`;
       debugLog("runUnitPhase", { phase: "worktree-health-invalid-repo", basePath: s.basePath, classification: projectClassification });
-      if (projectClassification.reason === "missing .git" && hasGit) {
+      if (_shouldProceedWithInvalidRepoClassificationForTest(projectClassification.reason, hasGit)) {
         ctx.ui.notify(
           `Warning: ${s.basePath} project classification could not confirm .git; assuming it has no project content yet — proceeding as greenfield project because worktree health reported .git present`,
           "warning",
@@ -2068,7 +2098,7 @@ export async function runUnitPhase(
     const currentLedger = deps.getLedger() as { units: Array<{ type: string; id: string; startedAt: number; toolCalls: number }> } | null;
     if (currentLedger?.units) {
       const lastUnit = [...currentLedger.units].reverse().find(
-        (u: { type: string; id: string; startedAt: number; toolCalls: number }) => u.type === unitType && u.id === unitId && u.startedAt === s.currentUnit?.startedAt,
+        (u: { type: string; id: string; startedAt: number; toolCalls: number }) => u.type === unitType && u.id === unitId && u.startedAt === _resolveCurrentUnitStartedAtForTest(s.currentUnit),
       );
       if (lastUnit && lastUnit.toolCalls === 0) {
         if (USER_DRIVEN_DEEP_UNITS.has(unitType) && isAwaitingUserInput(s.lastUnitAgentEndMessages ?? undefined)) {
@@ -2090,7 +2120,7 @@ export async function runUnitPhase(
           );
           // Fall through to next iteration where dispatch will re-derive
           // and re-dispatch this unit.
-          return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt, requestDispatchedAt: unitResult.requestDispatchedAt } };
+          return { action: "next", data: { unitStartedAt: _resolveCurrentUnitStartedAtForTest(s.currentUnit), requestDispatchedAt: unitResult.requestDispatchedAt } };
         }
       }
     }
@@ -2155,7 +2185,7 @@ export async function runUnitPhase(
     s.checkpointSha = null;
   }
 
-  return { action: "next", data: { unitStartedAt: s.currentUnit?.startedAt, requestDispatchedAt: unitResult.requestDispatchedAt } };
+  return { action: "next", data: { unitStartedAt: _resolveCurrentUnitStartedAtForTest(s.currentUnit), requestDispatchedAt: unitResult.requestDispatchedAt } };
 }
 
 // ─── runFinalize ──────────────────────────────────────────────────────────────
@@ -2333,6 +2363,11 @@ export async function runFinalize(
     // Step mode — exit the loop (caller handles wizard)
     debugLog("autoLoop", { phase: "exit", reason: "step-wizard" });
     return { action: "break", reason: "step-wizard" };
+  }
+
+  if (preUnitSnapshot?.type === "complete-milestone" && s.currentMilestoneId) {
+    const stop = await _runMilestoneMergeOnceWithStashRestore(ic, s.currentMilestoneId);
+    if (stop) return stop;
   }
 
   // Both pre and post verification completed without timeout — reset counter

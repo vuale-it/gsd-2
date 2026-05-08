@@ -1,14 +1,16 @@
+// Project/App: GSD-2
+// File Purpose: Registers read-only DB query tools.
 // GSD2 — Read-only query tools exposing DB state to the LLM via the WAL connection
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { ensureDbOpen } from "./dynamic-tools.js";
+import { ensureDbOpen, safeWorkspaceCwd } from "./dynamic-tools.js";
 
 function toolWorkspaceRoot(ctx: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 export function registerQueryTools(pi: ExtensionAPI): void {

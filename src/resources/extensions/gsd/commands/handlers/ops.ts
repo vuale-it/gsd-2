@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Handles operational /gsd subcommands.
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import { enableDebug } from "../../debug-logger.js";
@@ -15,7 +17,7 @@ import { handleRemote } from "../../../remote-questions/mod.js";
 import { handleShip } from "../../commands-ship.js";
 import { handleSessionReport } from "../../commands-session-report.js";
 import { handlePrBranch } from "../../commands-pr-branch.js";
-import { projectRoot } from "../context.js";
+import { currentDirectoryRoot, projectRoot } from "../context.js";
 
 export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<boolean> {
   if (trimmed === "init") {
@@ -117,7 +119,7 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
     return true;
   }
   if (trimmed === "triage") {
-    await handleTriage(ctx, pi, process.cwd());
+    await handleTriage(ctx, pi, currentDirectoryRoot());
     return true;
   }
   if (trimmed === "config") {

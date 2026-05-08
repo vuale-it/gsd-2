@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Auto-mode orchestration, session lifecycle, and stop handling.
 /**
  * GSD Auto Mode — Fresh Session Per Unit
  *
@@ -354,6 +356,14 @@ function restoreProjectRootEnv(): void {
   s.projectRootEnvCaptured = false;
 }
 
+export function _captureProjectRootEnvForTest(projectRoot: string): void {
+  captureProjectRootEnv(projectRoot);
+}
+
+export function _restoreProjectRootEnvForTest(): void {
+  restoreProjectRootEnv();
+}
+
 function captureMilestoneLockEnv(milestoneId: string | null): void {
   if (!s.milestoneLockEnvCaptured) {
     s.hadMilestoneLockEnv = Object.prototype.hasOwnProperty.call(process.env, "GSD_MILESTONE_LOCK");
@@ -440,6 +450,16 @@ export function _synthesizePausedSessionRecoveryForTest(
   sessionFile: string,
 ): ReturnType<typeof synthesizeCrashRecovery> {
   return synthesizePausedSessionRecovery(basePath, unitType, unitId, sessionFile);
+}
+
+export function _resolvePausedResumeBasePathForTest(
+  basePath: string,
+  pausedWorktreePath: string | null | undefined,
+  pathExists: (path: string) => boolean = existsSync,
+): string {
+  return pausedWorktreePath && pathExists(pausedWorktreePath)
+    ? pausedWorktreePath
+    : basePath;
 }
 
 const DETACHED_AUTO_KEEPALIVE_INTERVAL_MS = 30_000;
@@ -671,6 +691,30 @@ export function _warnIfWorktreeMissingForTest(
 
 export function isAutoPaused(): boolean {
   return s.paused;
+}
+
+export interface ResumeResourceRefreshDeps {
+  env?: NodeJS.ProcessEnv;
+  importModule?: (specifier: string) => Promise<any>;
+  openProjectDb?: (basePath: string) => Promise<void>;
+}
+
+export async function refreshResumeResourcesAndDb(
+  basePath: string,
+  deps: ResumeResourceRefreshDeps = {},
+): Promise<void> {
+  const env = deps.env ?? process.env;
+  const importModule = deps.importModule ?? ((specifier: string) => import(specifier));
+  const agentDir = env.GSD_CODING_AGENT_DIR || join(gsdHome(), "agent");
+  const pkgRoot = env.GSD_PKG_ROOT;
+  const resourceLoaderPath = pkgRoot
+    ? pathToFileURL(join(pkgRoot, "dist", "resource-loader.js")).href
+    : new URL("../../../resource-loader.js", import.meta.url).href;
+  const { initResources } = await importModule(resourceLoaderPath);
+  initResources(agentDir);
+  const { primeCache } = await importModule("./prompt-loader.js");
+  primeCache();
+  await (deps.openProjectDb ?? openProjectDbIfPresent)(basePath);
 }
 
 export function setActiveEngineId(id: string | null): void {
@@ -927,7 +971,23 @@ function handleLostSessionLock(
  * the stale unit state, progress widget, status badge, and restores CWD so
  * the dashboard does not show an orphaned timer and the shell is usable.
  */
-function cleanupAfterLoopExit(ctx: ExtensionContext): void {
+export async function rerootCommandSession(
+  cmdCtx: Pick<ExtensionCommandContext, "newSession"> | null | undefined,
+  workspaceRoot: string,
+): Promise<{ status: "skipped" | "ok" | "cancelled" | "failed"; error?: string }> {
+  if (!cmdCtx || !workspaceRoot) return { status: "skipped" };
+  try {
+    const result = await cmdCtx.newSession({ workspaceRoot });
+    return result.cancelled ? { status: "cancelled" } : { status: "ok" };
+  } catch (err) {
+    return {
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void> {
   s.currentUnit = null;
   s.active = false;
   deactivateGSD();
@@ -965,6 +1025,30 @@ function cleanupAfterLoopExit(ctx: ExtensionContext): void {
       logWarning("engine", `chdir failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   }
+
+  if (s.originalBasePath && s.cmdCtx) {
+    const result = await rerootCommandSession(s.cmdCtx, s.basePath);
+    if (result.status === "cancelled") {
+      logWarning("engine", "post-loop session re-root was cancelled", { file: "auto.ts", basePath: s.basePath });
+    } else if (result.status === "failed") {
+      logWarning("engine", `post-loop session re-root failed: ${result.error ?? "unknown"}`, { file: "auto.ts", basePath: s.basePath });
+    }
+  }
+}
+
+export function _cleanupAfterLoopExitForTest(ctx: ExtensionContext): Promise<void> {
+  return cleanupAfterLoopExit(ctx);
+}
+
+export type AutoWorktreeExitAction = "skip" | "merge" | "preserve";
+
+export function _resolveAutoWorktreeExitActionForTest(
+  currentMilestoneId: string | null | undefined,
+  milestoneMergedInPhases: boolean,
+  milestoneComplete: boolean,
+): AutoWorktreeExitAction {
+  if (!currentMilestoneId || milestoneMergedInPhases) return "skip";
+  return milestoneComplete ? "merge" : "preserve";
 }
 
 export async function stopAuto(
@@ -1118,10 +1202,16 @@ export async function stopAuto(
           logWarning("engine", `milestone summary check failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
         }
 
-        if (milestoneComplete) {
+        const exitAction = _selectStopAutoWorktreeExit({
+          currentMilestoneId: s.currentMilestoneId,
+          milestoneComplete,
+          milestoneMergedInPhases: s.milestoneMergedInPhases,
+        });
+
+        if (exitAction === "merge") {
           // Milestone is complete — merge worktree branch back to main
           resolver.mergeAndExit(s.currentMilestoneId, notifyCtx);
-        } else {
+        } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
           resolver.exitMilestone(s.currentMilestoneId, notifyCtx, {
             preserveBranch: true,
@@ -1129,6 +1219,10 @@ export async function stopAuto(
         }
       }
     } catch (e) {
+      ctx?.ui.notify(
+        `Worktree cleanup failed for ${s.currentMilestoneId ?? "current milestone"}: ${e instanceof Error ? e.message : String(e)}. Resolve the preserved branch/worktree and run /gsd auto to resume.`,
+        "warning",
+      );
       debugLog("stop-cleanup-worktree", { error: e instanceof Error ? e.message : String(e) });
     }
 
@@ -1179,13 +1273,11 @@ export async function stopAuto(
     // its own cwd for tools and system prompt; refresh it before returning to the
     // user so follow-up commands do not target a removed milestone worktree.
     if (s.originalBasePath && ctx && s.cmdCtx) {
-      try {
-        const result = await s.cmdCtx.newSession({ workspaceRoot: s.basePath });
-        if (result.cancelled) {
-          logWarning("engine", "post-stop session re-root was cancelled", { file: "auto.ts", basePath: s.basePath });
-        }
-      } catch (err) {
-        logWarning("engine", `post-stop session re-root failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts", basePath: s.basePath });
+      const result = await rerootCommandSession(s.cmdCtx, s.basePath);
+      if (result.status === "cancelled") {
+        logWarning("engine", "post-stop session re-root was cancelled", { file: "auto.ts", basePath: s.basePath });
+      } else if (result.status === "failed") {
+        logWarning("engine", `post-stop session re-root failed: ${result.error ?? "unknown"}`, { file: "auto.ts", basePath: s.basePath });
       }
     }
 
@@ -1315,6 +1407,17 @@ export async function stopAuto(
     // Reset all session state in one call
     s.reset();
   }
+}
+
+export type StopAutoWorktreeExitAction = "none" | "merge" | "preserve";
+
+export function _selectStopAutoWorktreeExit(args: {
+  currentMilestoneId: string | null;
+  milestoneComplete: boolean;
+  milestoneMergedInPhases: boolean;
+}): StopAutoWorktreeExitAction {
+  if (!args.currentMilestoneId || args.milestoneMergedInPhases) return "none";
+  return args.milestoneComplete ? "merge" : "preserve";
 }
 
 /**
@@ -1995,9 +2098,7 @@ export async function startAuto(
         { file: "auto.ts", milestoneId: s.currentMilestoneId ?? "" },
       );
     }
-    if (resumeWorktreePath && existsSync(resumeWorktreePath)) {
-      s.basePath = resumeWorktreePath;
-    }
+    s.basePath = _resolvePausedResumeBasePathForTest(base, resumeWorktreePath);
     // Rebuild scope now that s.basePath reflects the actual worktree (or project root).
     rebuildScope(s.basePath, s.currentMilestoneId);
     // Ensure the workflow-logger audit log is pinned to the project root
@@ -2049,20 +2150,7 @@ export async function startAuto(
     // tree; deployed extensions live at ~/.gsd/agent/extensions/gsd/ where the
     // relative path resolves to ~/.gsd/agent/resource-loader.js which doesn't exist.
     // Using GSD_PKG_ROOT constructs a correct absolute path in both contexts (#3949).
-    const agentDir = process.env.GSD_CODING_AGENT_DIR || join(gsdHome(), "agent");
-    const pkgRoot = process.env.GSD_PKG_ROOT;
-    const resourceLoaderPath = pkgRoot
-      ? pathToFileURL(join(pkgRoot, "dist", "resource-loader.js")).href
-      : new URL("../../../resource-loader.js", import.meta.url).href;
-    const { initResources } = await import(resourceLoaderPath);
-    initResources(agentDir);
-    // initResources() uses synchronous fs APIs, so the prompt-template cache
-    // can be primed immediately — no need for the legacy 1s setTimeout deferral.
-    const { primeCache } = await import("./prompt-loader.js");
-    primeCache();
-    // Open the project DB before rebuild/derive so resume uses DB-backed
-    // state instead of falling back to stale markdown parsing (#2940).
-    await openProjectDbIfPresent(s.basePath);
+    await refreshResumeResourcesAndDb(s.basePath);
     try {
       await rebuildState(s.basePath);
       pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state: await deriveState(s.basePath) });
@@ -2134,7 +2222,7 @@ export async function startAuto(
       runKernelLoop: runUokKernelLoop,
       runLegacyLoop: runLegacyAutoLoop,
     });
-    cleanupAfterLoopExit(ctx);
+    await cleanupAfterLoopExit(ctx);
     return;
   }
 
@@ -2194,7 +2282,7 @@ export async function startAuto(
     runKernelLoop: runUokKernelLoop,
     runLegacyLoop: runLegacyAutoLoop,
   });
-  cleanupAfterLoopExit(ctx);
+  await cleanupAfterLoopExit(ctx);
 }
 
 // describeNextUnit is imported from auto-dashboard.ts and re-exported

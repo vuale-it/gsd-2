@@ -1,4 +1,7 @@
+// Project/App: GSD-2
+// File Purpose: Registers workspace-aware dynamic filesystem and shell tools.
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
@@ -8,11 +11,21 @@ import { DEFAULT_BASH_TIMEOUT_SECS } from "../constants.js";
 import { setLogBasePath, logWarning } from "../workflow-logger.js";
 import { resolveGsdPathContract } from "../paths.js";
 
+export function safeWorkspaceCwd(): string {
+  try {
+    return process.cwd();
+  } catch {
+    const projectRoot = process.env.GSD_PROJECT_ROOT;
+    if (projectRoot && existsSync(projectRoot)) return projectRoot;
+    return homedir();
+  }
+}
+
 function resolveToolWorkspaceRoot(ctx?: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 /**
@@ -25,7 +38,7 @@ export function resolveProjectRootDbPath(basePath: string): string {
   return resolveGsdPathContract(basePath).projectDb;
 }
 
-export async function ensureDbOpen(basePath: string = process.cwd()): Promise<boolean> {
+export async function ensureDbOpen(basePath: string = safeWorkspaceCwd()): Promise<boolean> {
   try {
     const db = await import("../gsd-db.js");
     const contract = resolveGsdPathContract(basePath);
@@ -57,7 +70,8 @@ export async function ensureDbOpen(basePath: string = process.cwd()): Promise<bo
 }
 
 export function registerDynamicTools(pi: ExtensionAPI): void {
-  const baseBash = createBashTool(process.cwd(), {
+  const fallbackRoot = safeWorkspaceCwd();
+  const baseBash = createBashTool(fallbackRoot, {
     spawnHook: (ctx) => ctx,
   });
   const dynamicBash = {
@@ -82,7 +96,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
   };
   pi.registerTool(dynamicBash as any);
 
-  const baseWrite = createWriteTool(process.cwd());
+  const baseWrite = createWriteTool(fallbackRoot);
   pi.registerTool({
     ...baseWrite,
     execute: async (
@@ -97,7 +111,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
     },
   } as any);
 
-  const baseRead = createReadTool(process.cwd());
+  const baseRead = createReadTool(fallbackRoot);
   pi.registerTool({
     ...baseRead,
     execute: async (
@@ -112,7 +126,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
     },
   } as any);
 
-  const baseEdit = createEditTool(process.cwd());
+  const baseEdit = createEditTool(fallbackRoot);
   pi.registerTool({
     ...baseEdit,
     execute: async (

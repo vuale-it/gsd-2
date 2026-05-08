@@ -1,14 +1,17 @@
+// Project/App: GSD-2
+// File Purpose: Registers journal query tools.
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 import { queryJournal } from "../journal.js";
 import { logWarning } from "../workflow-logger.js";
+import { safeWorkspaceCwd } from "./dynamic-tools.js";
 
 function toolWorkspaceRoot(ctx: unknown): string {
   if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
     return (ctx as { cwd: string }).cwd;
   }
-  return process.cwd();
+  return safeWorkspaceCwd();
 }
 
 export function registerJournalTools(pi: ExtensionAPI): void {

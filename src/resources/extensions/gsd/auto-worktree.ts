@@ -28,6 +28,7 @@ import {
   isDbAvailable,
   getMilestone,
   getMilestoneSlices,
+  getSliceTasks,
   closeDatabase,
   openDatabase,
   getDbPath,
@@ -194,6 +195,48 @@ function isSamePath(a: string, b: string): boolean {
   }
 }
 
+export function _isSamePathForTest(a: string, b: string): boolean {
+  return isSamePath(a, b);
+}
+
+export function _resolveAutoWorktreeStartPointForTest(
+  integrationBranch: string | null | undefined,
+  gitMainBranch: string | null | undefined,
+  branchExists: (branch: string) => boolean,
+): string | undefined {
+  if (integrationBranch) return integrationBranch;
+  return gitMainBranch &&
+    typeof gitMainBranch === "string" &&
+    gitMainBranch.length > 0 &&
+    branchExists(gitMainBranch)
+    ? gitMainBranch
+    : undefined;
+}
+
+export function _shouldReconcileWorktreeDbForTest(
+  worktreeDbPath: string,
+  mainDbPath: string,
+  pathExists: (path: string) => boolean = existsSync,
+  samePath: (a: string, b: string) => boolean = isSamePath,
+): boolean {
+  return pathExists(worktreeDbPath) && !samePath(worktreeDbPath, mainDbPath);
+}
+
+export function _isExpectedWorktreeUnlinkErrorForTest(
+  code: string | undefined,
+): boolean {
+  return code === "ENOENT" || code === "EISDIR";
+}
+
+function stripGsdDisplayPrefix(value: string | undefined | null, id: string): string | undefined {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+  const lower = raw.toLowerCase();
+  const idLower = id.toLowerCase();
+  if (lower.startsWith(`${idLower}:`)) return raw.slice(id.length + 1).trim() || undefined;
+  return raw;
+}
+
 // ─── ASSESSMENT Force-Sync Helper (#2821) ─────────────────────────────────
 
 /** Regex matching YAML frontmatter `verdict:` field. */
@@ -357,7 +400,7 @@ function clearProjectRootStateFiles(basePath: string, milestoneId: string): void
             } catch (err) {
               // ENOENT/EISDIR are expected for already-removed or directory entries (#3597)
               const code = (err as NodeJS.ErrnoException).code;
-              if (code !== "ENOENT" && code !== "EISDIR") {
+              if (!_isExpectedWorktreeUnlinkErrorForTest(code)) {
                 logWarning("worktree", `untracked file unlink failed: ${err instanceof Error ? err.message : String(err)}`);
               }
             }
@@ -1096,19 +1139,12 @@ export function enterBranchModeForMilestone(
     const integrationBranch =
       readIntegrationBranch(basePath, milestoneId) ?? undefined;
     const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
-    // Validate main_branch preference exists in the repo before using it —
-    // a stale preference (e.g. "master" when repo uses "main") would cause
-    // nativeBranchForceReset to fail with a bad start-point reference.
-    const validatedPrefBranch =
-      gitPrefs?.main_branch &&
-      typeof gitPrefs.main_branch === "string" &&
-      gitPrefs.main_branch.length > 0 &&
-      nativeBranchExists(basePath, gitPrefs.main_branch)
-        ? gitPrefs.main_branch
-        : undefined;
     const startPoint =
-      integrationBranch ??
-      validatedPrefBranch ??
+      _resolveAutoWorktreeStartPointForTest(
+        integrationBranch,
+        gitPrefs?.main_branch,
+        (branchName) => nativeBranchExists(basePath, branchName),
+      ) ??
       nativeDetectMainBranch(basePath);
 
     // TOCTOU ancestry guard (Issue #4980 HIGH-3).
@@ -1345,14 +1381,11 @@ export function createAutoWorktree(
     const integrationBranch =
       readIntegrationBranch(basePath, milestoneId) ?? undefined;
     const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
-    const validatedPrefBranch =
-      gitPrefs?.main_branch &&
-      typeof gitPrefs.main_branch === "string" &&
-      gitPrefs.main_branch.length > 0 &&
-      nativeBranchExists(basePath, gitPrefs.main_branch)
-        ? gitPrefs.main_branch
-        : undefined;
-    const startPoint = integrationBranch ?? validatedPrefBranch ?? undefined;
+    const startPoint = _resolveAutoWorktreeStartPointForTest(
+      integrationBranch,
+      gitPrefs?.main_branch,
+      (branchName) => nativeBranchExists(basePath, branchName),
+    );
     info = createWorktree(basePath, milestoneId, {
       branch,
       startPoint,
@@ -1448,7 +1481,7 @@ export function teardownAutoWorktree(
         const contract = resolveGsdPathContract(previousCwd, originalBasePath);
         const worktreeDbPath = join(contract.worktreeGsd ?? join(previousCwd, ".gsd"), "gsd.db");
         const mainDbPath = contract.projectDb;
-        if (existsSync(worktreeDbPath) && !isSamePath(worktreeDbPath, mainDbPath)) {
+        if (_shouldReconcileWorktreeDbForTest(worktreeDbPath, mainDbPath)) {
           reconcileWorktreeDb(mainDbPath, worktreeDbPath);
         }
       } catch (err) {
@@ -1747,7 +1780,7 @@ export function mergeMilestoneToMain(
       const contract = resolveGsdPathContract(worktreeCwd, originalBasePath_);
       const worktreeDbPath = join(contract.worktreeGsd ?? join(worktreeCwd, ".gsd"), "gsd.db");
       const mainDbPath = contract.projectDb;
-      if (existsSync(worktreeDbPath) && !isSamePath(worktreeDbPath, mainDbPath)) {
+      if (_shouldReconcileWorktreeDbForTest(worktreeDbPath, mainDbPath)) {
         reconcileWorktreeDb(mainDbPath, worktreeDbPath);
       }
     } catch (err) {
@@ -1757,18 +1790,25 @@ export function mergeMilestoneToMain(
   }
 
   // 2. Get completed slices for commit message
-  let completedSlices: { id: string; title: string }[] = [];
+  let completedSlices: { id: string; title: string; tasks: Array<{ id: string; title: string }> }[] = [];
   if (isDbAvailable()) {
     completedSlices = getMilestoneSlices(milestoneId)
       .filter(s => s.status === "complete")
-      .map(s => ({ id: s.id, title: s.title }));
+      .map(s => ({
+        id: s.id,
+        title: stripGsdDisplayPrefix(s.title, s.id) ?? s.id,
+        tasks: getSliceTasks(milestoneId, s.id).map((task) => ({
+          id: task.id,
+          title: stripGsdDisplayPrefix(task.title, task.id) ?? task.id,
+        })),
+      }));
   }
   // Fallback: parse roadmap content when DB is unavailable
   if (completedSlices.length === 0 && roadmapContent) {
     const sliceRe = /- \[x\] \*\*(\w+):\s*(.+?)\*\*/gi;
     let m: RegExpExecArray | null;
     while ((m = sliceRe.exec(roadmapContent)) !== null) {
-      completedSlices.push({ id: m[1], title: m[2] });
+      completedSlices.push({ id: m[1], title: m[2], tasks: [] });
     }
   }
 
@@ -1841,8 +1881,7 @@ export function mergeMilestoneToMain(
 
   // 6. Build rich commit message
   const dbMilestone = getMilestone(milestoneId);
-  let milestoneTitle =
-    (dbMilestone?.title ?? "").replace(/^M\d+:\s*/, "").trim();
+  let milestoneTitle = stripGsdDisplayPrefix(dbMilestone?.title, milestoneId) ?? "";
   // Fallback: parse title from roadmap content header (e.g. "# M020: Backend foundation")
   if (!milestoneTitle && roadmapContent) {
     const titleMatch = roadmapContent.match(new RegExp(`^#\\s+${milestoneId}:\\s*(.+)`, "m"));
@@ -1850,14 +1889,21 @@ export function mergeMilestoneToMain(
   }
   milestoneTitle = milestoneTitle || milestoneId;
   const subject = `feat: ${milestoneTitle}`;
+  const milestoneContext = milestoneTitle === milestoneId
+    ? `Milestone: ${milestoneId}`
+    : `Milestone: ${milestoneId} - ${milestoneTitle}`;
   let body = "";
   if (completedSlices.length > 0) {
     const sliceLines = completedSlices
       .map((s) => `- ${s.id}: ${s.title}`)
       .join("\n");
-    body = `\n\nCompleted slices:\n${sliceLines}\n\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
+    const taskLines = completedSlices
+      .flatMap((s) => s.tasks.map((task) => `- ${s.id}/${task.id}: ${task.title}`))
+      .join("\n");
+    const taskBlock = taskLines ? `\n\nCompleted tasks:\n${taskLines}` : "";
+    body = `\n\nCompleted slices:\n${sliceLines}${taskBlock}\n\n${milestoneContext}\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
   } else {
-    body = `\n\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
+    body = `\n\n${milestoneContext}\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
   }
   const commitMessage = subject + body;
 
