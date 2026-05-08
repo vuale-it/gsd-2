@@ -146,24 +146,43 @@ test("handleAgentEvent: standalone completed tool events roll up incrementally",
 		["read-2", "read"],
 		["edit-1", "edit"],
 	] as const) {
+		const target =
+			toolName === "edit"
+				? {
+						kind: "file",
+						action: "edit",
+						inputPath: `src/${toolCallId}.txt`,
+						resolvedPath: `/tmp/project/src/${toolCallId}.txt`,
+						line: 10,
+					}
+				: {
+						kind: "file",
+						action: "read",
+						inputPath: `src/${toolCallId}.txt`,
+						resolvedPath: `/tmp/project/src/${toolCallId}.txt`,
+					};
 		await handleAgentEvent(host, {
 			type: "tool_execution_start",
 			toolCallId,
 			toolName,
-			args: { path: `/tmp/${toolCallId}.txt` },
+			args: { path: `src/${toolCallId}.txt` },
 		} as any);
 		await handleAgentEvent(host, {
 			type: "tool_execution_end",
 			toolCallId,
 			toolName,
-			result: { content: [], isError: false },
+			result: { content: [], details: { target }, isError: false },
 			isError: false,
 		} as any);
 	}
 
 	const rendered = stripAnsi(chatContainer.render(100).join("\n"));
-	assert.match(rendered, /Context reads 2 actions\s+success · \d+(ms|s)/);
-	assert.match(rendered, /File changes 1 action\s+success · \d+(ms|s)/);
-	assert.doesNotMatch(rendered, /\bread\s+success ·/);
+	assert.match(rendered, /Context reads · 2 files\s+success · \d+(ms|s)/);
+	assert.match(rendered, /src\/read-1\.txt/);
+	assert.match(rendered, /src\/read-2\.txt/);
+	assert.match(rendered, /File changes · 1 file, 1 edit\s+success · \d+(ms|s)/);
+	assert.match(rendered, /src\/edit-1\.txt:10/);
+	assert.doesNotMatch(rendered, /^\s*│?\s*read\s+success ·/m);
+	assert.doesNotMatch(rendered, /^\s*│?\s*edit\s+success ·/m);
 	assert.ok(renderCount > 0);
 });

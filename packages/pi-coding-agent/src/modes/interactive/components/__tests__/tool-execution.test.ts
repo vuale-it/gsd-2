@@ -113,10 +113,124 @@ describe("ToolExecutionComponent", () => {
 		assert.deepEqual(component.getRollupPhase()?.label, "Other tool actions");
 	});
 
+	test("renders compact read rows with target metadata", () => {
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "src/Inspector.tsx" },
+			{
+				content: [{ type: "text", text: "source" }],
+				isError: false,
+				details: {
+					target: {
+						kind: "file",
+						action: "read",
+						inputPath: "src/Inspector.tsx",
+						resolvedPath: "/tmp/project/src/Inspector.tsx",
+						range: { start: 4, end: 12 },
+					},
+				},
+			},
+		);
+
+		assert.match(rendered, /read .*src\/Inspector\.tsx:4-12/);
+		assert.doesNotMatch(rendered, /source/);
+	});
+
+	test("renders compact edit rows with target metadata", () => {
+		const rendered = renderToolCollapsed(
+			"edit",
+			{ path: "src/Inspector.tsx" },
+			{
+				content: [{ type: "text", text: "Updated src/Inspector.tsx" }],
+				isError: false,
+				details: {
+					target: {
+						kind: "file",
+						action: "edit",
+						inputPath: "src/Inspector.tsx",
+						resolvedPath: "/tmp/project/src/Inspector.tsx",
+						line: 42,
+					},
+				},
+			},
+		);
+
+		assert.match(rendered, /edit .*src\/Inspector\.tsx:42/);
+		assert.doesNotMatch(rendered, /Updated src\/Inspector\.tsx/);
+	});
+
+	test("renders compact write rows with target metadata", () => {
+		const rendered = renderToolCollapsed(
+			"write",
+			{ path: "src/output.ts", content: "ok" },
+			{
+				content: [{ type: "text", text: "Successfully wrote 2 bytes to src/output.ts" }],
+				isError: false,
+				details: {
+					target: {
+						kind: "file",
+						action: "write",
+						inputPath: "src/output.ts",
+						resolvedPath: "/tmp/project/src/output.ts",
+					},
+				},
+			},
+		);
+
+		assert.match(rendered, /write .*src\/output\.ts/);
+		assert.doesNotMatch(rendered, /Successfully wrote/);
+	});
+
+	test("renders compact bash rows with command preview", () => {
+		const rendered = renderToolCollapsed(
+			"bash",
+			{ command: "npm run typecheck -- --watch false" },
+			{ content: [{ type: "text", text: "ok" }], isError: false, details: { cwd: "/tmp/project" } },
+		);
+
+		assert.match(rendered, /bash npm run typecheck -- --watch false/);
+		assert.doesNotMatch(rendered, /\bok\b/);
+	});
+
+	test("keeps failed tools expanded and error visible", () => {
+		const rendered = renderToolCollapsed(
+			"edit",
+			{ path: "src/Inspector.tsx" },
+			{
+				content: [{ type: "text", text: "Could not find target text" }],
+				isError: true,
+				details: {
+					target: {
+						kind: "file",
+						action: "edit",
+						inputPath: "src/Inspector.tsx",
+						resolvedPath: "/tmp/project/src/Inspector.tsx",
+					},
+				},
+			},
+		);
+
+		assert.match(rendered, /Could not find target text/);
+		assert.match(rendered, /edit/);
+	});
+
 	test("renders phase-based summaries for rolled-up tool executions", () => {
 		const phases: ToolExecutionPhase[] = [
 			{ label: "Setup / shell", count: 6, durationMs: 12 },
-			{ label: "Context reads", count: 4, durationMs: 6 },
+			{
+				label: "Context reads",
+				count: 4,
+				durationMs: 6,
+				actionLabel: "read",
+				targets: ["/tmp/project/src/a.ts", "/tmp/project/src/b.ts"],
+			},
+			{
+				label: "File changes",
+				count: 3,
+				durationMs: 5,
+				actionLabel: "edit",
+				targets: ["/tmp/project/src/Inspector.tsx:42", "/tmp/project/src/CompareView.tsx:8"],
+			},
 			{ label: "Requirement writes", count: 4, durationMs: 4 },
 			{ label: "Memory lookups", count: 4, durationMs: 4 },
 			{ label: "Finalization", count: 1, durationMs: 1 },
@@ -124,7 +238,10 @@ describe("ToolExecutionComponent", () => {
 		const rendered = stripAnsi(new ToolPhaseSummaryComponent(phases).render(120).join("\n"));
 
 		assert.match(rendered, /Setup \/ shell 6 actions\s+success · 12ms/);
-		assert.match(rendered, /Context reads 4 actions\s+success · 6ms/);
+		assert.match(rendered, /Context reads · 2 files\s+success · 6ms/);
+		assert.match(rendered, /src\/a\.ts/);
+		assert.match(rendered, /File changes · 2 files, 3 edits\s+success · 5ms/);
+		assert.match(rendered, /src\/Inspector\.tsx:42/);
 		assert.match(rendered, /Requirement writes 4 actions\s+success · 4ms/);
 		assert.match(rendered, /Memory lookups 4 actions\s+success · 4ms/);
 		assert.match(rendered, /Finalization 1 action\s+success · 1ms/);

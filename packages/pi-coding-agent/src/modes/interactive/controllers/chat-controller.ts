@@ -113,9 +113,25 @@ function mergeToolPhases(phases: ToolExecutionPhase[]): ToolExecutionPhase[] {
 		if (previous?.label === phase.label) {
 			previous.count += phase.count;
 			previous.durationMs += phase.durationMs;
+			previous.targets = mergeTargets(previous.targets, phase.targets);
+			if (previous.actionLabel !== phase.actionLabel) {
+				previous.actionLabel = undefined;
+			}
 		} else {
-			merged.push({ ...phase });
+			merged.push({ ...phase, targets: phase.targets ? [...phase.targets] : undefined });
 		}
+	}
+	return merged;
+}
+
+function mergeTargets(existing: string[] | undefined, incoming: string[] | undefined): string[] | undefined {
+	if (!existing && !incoming) return undefined;
+	const seen = new Set<string>();
+	const merged: string[] = [];
+	for (const target of [...(existing ?? []), ...(incoming ?? [])]) {
+		if (!target || seen.has(target)) continue;
+		seen.add(target);
+		merged.push(target);
 	}
 	return merged;
 }

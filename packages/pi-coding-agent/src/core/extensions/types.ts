@@ -69,6 +69,7 @@ import type {
 	LsToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	WriteToolDetails,
 	WriteToolInput,
 } from "../tools/index.js";
 
@@ -1031,7 +1032,7 @@ export interface EditToolResultEvent extends ToolResultEventBase {
 
 export interface WriteToolResultEvent extends ToolResultEventBase {
 	toolName: "write";
-	details: undefined;
+	details: WriteToolDetails | undefined;
 }
 
 export interface GrepToolResultEvent extends ToolResultEventBase {

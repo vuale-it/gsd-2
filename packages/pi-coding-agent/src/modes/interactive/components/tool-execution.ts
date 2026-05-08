@@ -111,9 +111,10 @@ function renderToolFrame(
 	const statusColor = opts.tone === "error" ? "toolError" : opts.tone === "pending" ? "toolRunning" : "toolSuccess";
 	const leftStyled = theme.fg(labelColor, theme.bold(opts.label));
 	const rightStyled = theme.fg(statusColor, opts.status);
-	const gap = Math.max(1, outerWidth - visibleWidth(leftStyled) - visibleWidth(rightStyled));
+	const titleWidth = Math.max(1, outerWidth - 4);
+	const gap = Math.max(1, titleWidth - visibleWidth(leftStyled) - visibleWidth(rightStyled));
 	const headerRow = `${leftStyled}${" ".repeat(gap)}${rightStyled}`;
-	const headerPad = Math.max(0, outerWidth - visibleWidth(headerRow));
+	const headerPad = Math.max(0, titleWidth - visibleWidth(headerRow));
 
 	const sourceLines = trimOuterBlankLines(contentLines);
 	const bodyLines = (sourceLines.length > 0 ? sourceLines : [""]).map((line) => {
@@ -122,7 +123,7 @@ function renderToolFrame(
 	});
 
 	return style()
-		.border("rule")
+		.border("rounded")
 		.borderColor((line) => theme.fg(line.startsWith("─") ? topColor : borderColor, line))
 		.title(headerRow + " ".repeat(headerPad))
 		.render(bodyLines, outerWidth);
@@ -157,11 +158,125 @@ export type ToolExecutionPhase = {
 	label: string;
 	count: number;
 	durationMs: number;
+	targets?: string[];
+	actionLabel?: string;
+};
+
+type ToolTargetMetadata = {
+	kind?: string;
+	action?: string;
+	inputPath?: string;
+	resolvedPath?: string;
+	pattern?: string;
+	glob?: string;
+	line?: number;
+	range?: {
+		start?: number;
+		end?: number;
+	};
 };
 
 function formatElapsed(ms: number): string {
 	if (ms < 1000) return `${ms}ms`;
 	return `${Math.max(1, Math.round(ms / 1000))}s`;
+}
+
+function formatCommandPreview(command: string): string {
+	return truncateToWidth(command.replace(/\s+/g, " ").trim(), 64, "");
+}
+
+function appendLineOrRange(displayPath: string | undefined, target: ToolTargetMetadata): string | undefined {
+	if (!displayPath) return undefined;
+	if (typeof target.line === "number" && Number.isFinite(target.line)) {
+		return `${displayPath}:${target.line}`;
+	}
+	const start = target.range?.start;
+	if (typeof start === "number" && Number.isFinite(start)) {
+		const end = target.range?.end;
+		const suffix =
+			typeof end === "number" && Number.isFinite(end) && end !== start
+				? `${start}-${end}`
+				: `${start}`;
+		return `${displayPath}:${suffix}`;
+	}
+	return displayPath;
+}
+
+function formatToolTarget(target: ToolTargetMetadata): string | undefined {
+	const path = target.resolvedPath || target.inputPath;
+	const displayPath = path ? shortenPath(path) : undefined;
+	if (target.kind === "search") {
+		const searchTarget = displayPath ?? target.inputPath ?? ".";
+		const label = target.pattern ? `${target.pattern} in ${searchTarget}` : searchTarget;
+		return target.glob ? `${label} (${target.glob})` : label;
+	}
+	return appendLineOrRange(displayPath, target);
+}
+
+function formatArgsPathTarget(path: string | null, args: Record<string, unknown>): string | undefined {
+	if (!path) return undefined;
+	const start = typeof args.offset === "number" ? args.offset : undefined;
+	const limit = typeof args.limit === "number" ? args.limit : undefined;
+	const range =
+		start !== undefined || limit !== undefined
+			? {
+					start: start ?? 1,
+					end: limit !== undefined ? (start ?? 1) + Math.max(0, limit - 1) : undefined,
+				}
+			: undefined;
+	return appendLineOrRange(shortenPath(path), { range });
+}
+
+function stripLineSuffix(target: string): string {
+	return target.replace(/:\d+(?:-\d+)?$/, "");
+}
+
+function uniqueTargets(targets: string[] | undefined): string[] {
+	const seen = new Set<string>();
+	const unique: string[] = [];
+	for (const target of targets ?? []) {
+		if (!target || seen.has(target)) continue;
+		seen.add(target);
+		unique.push(target);
+	}
+	return unique;
+}
+
+function summarizePhaseLabel(phase: ToolExecutionPhase): string {
+	const phaseTargets = uniqueTargets(phase.targets);
+	const baseTargets = uniqueTargets(phaseTargets.map(stripLineSuffix));
+	if (phase.label === "File changes" && baseTargets.length > 0) {
+		const fileWord = baseTargets.length === 1 ? "file" : "files";
+		const actionWord =
+			phase.actionLabel === "write"
+				? phase.count === 1
+					? "write"
+					: "writes"
+				: phase.actionLabel === undefined
+					? phase.count === 1
+						? "action"
+						: "actions"
+					: phase.count === 1
+						? "edit"
+						: "edits";
+		return `${phase.label} · ${baseTargets.length} ${fileWord}, ${phase.count} ${actionWord}`;
+	}
+	if (phase.label === "Context reads" && baseTargets.length > 0) {
+		const fileWord = baseTargets.length === 1 ? "file" : "files";
+		return `${phase.label} · ${baseTargets.length} ${fileWord}`;
+	}
+	if (phase.label === "Setup / shell" && phaseTargets.length > 0) {
+		return `${phase.label} · ${phase.count} ${phase.count === 1 ? "command" : "commands"}`;
+	}
+	return `${phase.label} ${phase.count} ${phase.count === 1 ? "action" : "actions"}`;
+}
+
+function summarizePhaseTargets(phase: ToolExecutionPhase, width: number): string | undefined {
+	const phaseTargets = uniqueTargets(phase.targets);
+	if (phaseTargets.length === 0) return undefined;
+	const shown = phaseTargets.slice(0, 3);
+	const suffix = phaseTargets.length > shown.length ? ` +${phaseTargets.length - shown.length} more` : "";
+	return truncateToWidth(shown.join(" · ") + suffix, width, "");
 }
 
 /**
@@ -607,10 +722,13 @@ export class ToolExecutionComponent extends Container {
 		if (!this.shouldRenderCompactSuccess()) return null;
 		const label = this.getPhaseLabel();
 		const endedAt = this.endedAt ?? Date.now();
+		const target = this.getCompactTarget();
 		return {
 			label,
 			count: 1,
 			durationMs: Math.max(0, endedAt - this.startedAt),
+			targets: target ? [target] : undefined,
+			actionLabel: this.getCompactAction(),
 		};
 	}
 
@@ -631,7 +749,52 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getCompactSummary(frameLabel: string): string {
-		return frameLabel;
+		if (this.normalizedToolName === "bash") {
+			const command = str(this.args?.command);
+			return command ? `bash ${formatCommandPreview(command)}` : frameLabel;
+		}
+		const target = this.getCompactTarget();
+		return target ? `${this.getCompactAction()} ${target}` : frameLabel;
+	}
+
+	private getCompactAction(): string {
+		const target = this.getTargetMetadata();
+		if (target?.action) return target.action === "list" ? "ls" : target.action;
+		return this.normalizedToolName;
+	}
+
+	private getTargetMetadata(): ToolTargetMetadata | undefined {
+		const target = this.result?.details?.target;
+		return target && typeof target === "object" ? target : undefined;
+	}
+
+	private getCompactTarget(): string | undefined {
+		const metadata = this.getTargetMetadata();
+		const metadataTarget = metadata ? formatToolTarget(metadata) : undefined;
+		if (metadataTarget) return metadataTarget;
+
+		const path = str(this.args?.file_path ?? this.args?.path);
+		if (path === null) return undefined;
+		if (this.normalizedToolName === "read" || this.normalizedToolName === "hashline_read") {
+			return formatArgsPathTarget(path, this.args);
+		}
+		if (this.normalizedToolName === "write" || this.normalizedToolName === "edit") {
+			return path ? shortenPath(path) : undefined;
+		}
+		if (this.normalizedToolName === "ls") {
+			return shortenPath(path || ".");
+		}
+		if (this.normalizedToolName === "find") {
+			const pattern = str(this.args?.pattern);
+			return pattern ? `${pattern} in ${shortenPath(path || ".")}` : shortenPath(path || ".");
+		}
+		if (this.normalizedToolName === "grep") {
+			const pattern = str(this.args?.pattern);
+			const glob = str(this.args?.glob);
+			const label = pattern ? `${pattern} in ${shortenPath(path || ".")}` : shortenPath(path || ".");
+			return glob ? `${label} (${glob})` : label;
+		}
+		return undefined;
 	}
 
 	private updateDisplay(): void {
@@ -861,6 +1024,10 @@ export class ToolExecutionComponent extends Container {
 			// Truncation warnings
 			const truncation = this.result.details?.truncation;
 			const fullOutputPath = this.result.details?.fullOutputPath;
+			const cwd = this.result.details?.cwd;
+			if (this.expanded && typeof cwd === "string" && cwd.length > 0) {
+				this.contentBox.addChild(new Text(`\n${theme.fg("muted", `cwd ${shortenPath(cwd)}`)}`, 0, 0));
+			}
 			if (truncation?.truncated || fullOutputPath) {
 				const warnings: string[] = [];
 				if (fullOutputPath) {
@@ -1288,19 +1455,21 @@ export class ToolPhaseSummaryComponent extends Container {
 	}
 
 	getPhases(): ToolExecutionPhase[] {
-		return this.phases.map((phase) => ({ ...phase }));
+		return this.phases.map((phase) => ({ ...phase, targets: phase.targets ? [...phase.targets] : undefined }));
 	}
 
 	override render(width: number): string[] {
 		const frameWidth = Math.max(20, width);
-		const rows = this.phases.map((phase) => {
-			const left = `${phase.label} ${phase.count} ${phase.count === 1 ? "action" : "actions"}`;
+		const rows = this.phases.flatMap((phase) => {
+			const left = summarizePhaseLabel(phase);
 			const right = `success · ${formatElapsed(phase.durationMs)}`;
 			const contentWidth = Math.max(1, frameWidth - 2);
 			const leftWidth = Math.max(1, contentWidth - visibleWidth(right) - 1);
 			const leftText = truncateToWidth(left, leftWidth, "");
 			const gap = Math.max(1, contentWidth - visibleWidth(leftText) - visibleWidth(right));
-			return `${theme.fg("toolSuccess", leftText)}${" ".repeat(gap)}${theme.fg("toolSuccess", right)}`;
+			const summaryRow = `${theme.fg("toolSuccess", leftText)}${" ".repeat(gap)}${theme.fg("toolSuccess", right)}`;
+			const targetRow = summarizePhaseTargets(phase, contentWidth);
+			return targetRow ? [summaryRow, theme.fg("muted", targetRow)] : [summaryRow];
 		});
 
 		return ["", ...style().border("minimal").borderColor((text) => theme.fg("toolSuccess", text)).render(rows, frameWidth)];

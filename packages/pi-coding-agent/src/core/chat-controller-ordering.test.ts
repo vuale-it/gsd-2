@@ -1049,7 +1049,9 @@ test("chat-controller rolls up only contiguous low-signal tool runs on message_e
 	assert.equal(host.chatContainer.children[1]?.constructor?.name, "AssistantMessageComponent");
 	assert.equal(host.chatContainer.children[2]?.constructor?.name, "ToolPhaseSummaryComponent");
 	assert.match(host.chatContainer.children[0].render(120).join("\n"), /Setup \/ shell 2 actions/);
-	assert.match(host.chatContainer.children[2].render(120).join("\n"), /Context reads 2 actions/);
+	const readSummary = host.chatContainer.children[2].render(120).join("\n");
+	assert.match(readSummary, /Context reads · 2 files/);
+	assert.match(readSummary, /\/tmp\/a · \/tmp\/b/);
 	assert.equal(host.chatContainer._prevRender, null, "summary reposition must invalidate the chat container render cache");
 });
 
