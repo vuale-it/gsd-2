@@ -2218,6 +2218,7 @@ export async function showSmartEntry(
 
     if (isFirst) {
       // First ever — skip wizard, just ask directly
+      ctx.ui.setStatus("gsd-step", "New Milestone · answer the questions above to plan");
       setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
       await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
         `New project, milestone ${nextId}. Do NOT read or explore .gsd/ — it's empty scaffolding.`,
@@ -2246,6 +2247,7 @@ export async function showSmartEntry(
       if (choice === "quick_task") {
         await runQuickTaskChoice(ctx, pi);
       } else if (choice === "new_milestone") {
+        ctx.ui.setStatus("gsd-step", "New Milestone · answer the questions above to plan");
         setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
         await dispatchWorkflow(pi, await prepareAndBuildDiscussPrompt(ctx, pi, nextId,
           `New milestone ${nextId}.`,
@@ -2447,6 +2449,7 @@ export async function showSmartEntry(
       if (choice === "quick_task") {
         await runQuickTaskChoice(ctx, pi);
       } else if (choice === "plan") {
+        ctx.ui.setStatus("gsd-step", "Planning Milestone · decomposing into slices");
         setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
         await dispatchWorkflow(
           pi,
@@ -2579,6 +2582,7 @@ export async function showSmartEntry(
     });
 
     if (choice === "plan") {
+      ctx.ui.setStatus("gsd-step", "Slice Planning · answer the questions above");
       await dispatchWorkflow(
         pi,
         await buildPlanSlicePrompt(milestoneId, milestoneTitle, sliceId, sliceTitle, basePath),
@@ -2641,6 +2645,7 @@ export async function showSmartEntry(
     });
 
     if (choice === "complete") {
+      ctx.ui.setStatus("gsd-step", "Completing Slice · review changes above");
       await dispatchWorkflow(
         pi,
         await buildCompleteSlicePrompt(milestoneId, milestoneTitle, sliceId, sliceTitle, basePath),
@@ -2709,6 +2714,7 @@ export async function showSmartEntry(
     }
 
     if (choice === "execute") {
+      ctx.ui.setStatus("gsd-step", "Executing Task · follow progress above");
       if (hasInterrupted) {
         await dispatchWorkflow(pi, loadPrompt("guided-resume-task", {
           milestoneId,

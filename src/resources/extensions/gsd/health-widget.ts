@@ -135,6 +135,9 @@ export function initHealthWidget(ctx: ExtensionContext): void {
       render(width: number): string[] {
         if (!cachedLines || cachedWidth !== width) {
           cachedLines = buildHealthLines(data, width);
+          if (data.projectState === "active") {
+            cachedLines = [...cachedLines, _theme.fg("dim", "  /gsd auto to run  ·  /gsd status for overview  ·  /gsd help")];
+          }
           cachedWidth = width;
         }
         return cachedLines;

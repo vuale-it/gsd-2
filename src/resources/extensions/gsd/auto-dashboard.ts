@@ -602,6 +602,21 @@ export function updateProgressWidget(
 ): void {
   if (!ctx.hasUI) return;
 
+  // Welcome header is a startup-only banner — permanently suppress it once
+  // auto-mode activates. The dashboard widget owns all status from here.
+  // Note: setHeader(undefined) restores the built-in header (logo +
+  // instructions). To actually render zero lines, install an empty header.
+  if (typeof ctx.ui?.setHeader === "function") {
+    ctx.ui.setHeader(() => ({
+      render(): string[] { return []; },
+      invalidate(): void {},
+    }));
+  }
+  // Clear wizard step badge — auto-mode owns the UI from this point
+  if (typeof ctx.ui?.setStatus === "function") {
+    ctx.ui.setStatus("gsd-step", undefined);
+  }
+
   const verb = unitVerb(unitType);
   const phaseLabel = unitPhaseLabel(unitType);
   const mid = state.activeMilestone;
@@ -1028,6 +1043,11 @@ export function updateProgressWidget(
             ? lastCommit.message.slice(0, maxCommitLen - 1) + "…"
             : lastCommit.message
           : "";
+        // Step-mode guidance — shown above keyboard hints when auto is paused
+        if (accessors.isStepMode()) {
+          lines.push(`${pad}${theme.fg("accent", "→")} ${theme.fg("dim", "Ctrl+N to advance to next step  ·  /gsd status for overview")}`);
+        }
+
         // Hints line
         const hintParts: string[] = [];
         hintParts.push("esc pause");

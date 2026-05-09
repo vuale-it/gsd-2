@@ -84,16 +84,26 @@ async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
       if (rc) remoteChannel = rc.channel;
     } catch { /* non-fatal */ }
 
-    ctx.ui.setHeader(() => ({
-      render(width: number): string[] {
-        return welcome.buildWelcomeScreenLines({
-          version: process.env.GSD_VERSION || "0.0.0",
-          remoteChannel,
-          width,
-        });
-      },
-      invalidate(): void {},
-    }));
+    ctx.ui.setHeader(() => {
+      let cachedLines: string[] | undefined;
+      let cachedWidth: number | undefined;
+      return {
+        render(width: number): string[] {
+          if (cachedLines !== undefined && cachedWidth === width) return cachedLines;
+          cachedLines = welcome.buildWelcomeScreenLines({
+            version: process.env.GSD_VERSION || "0.0.0",
+            remoteChannel,
+            width,
+          });
+          cachedWidth = width;
+          return cachedLines;
+        },
+        invalidate(): void {
+          cachedLines = undefined;
+          cachedWidth = undefined;
+        },
+      };
+    });
   } catch {
     /* non-fatal */
   }
