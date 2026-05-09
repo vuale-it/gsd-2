@@ -6,6 +6,314 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.81.0] - 2026-05-09
+
+### Added
+- **tui**: show tool targets in compact output
+- **gsd**: scope provider tools at request time
+- **pi-agent-core**: add provider-boundary token audit
+- **gsd**: startup audit reapplies orphaned gsd-preflight-stash entries
+- **db**: V28 — last_hit_at on memories + time-decay in relevance scoring
+- **db**: V27 — content_hash on artifacts for integrity fingerprinting
+- **tui**: align chat and tool cards with terminal design
+- **tui**: summarize low-signal tool output by phase
+- **tui**: wire adaptive refresher layouts
+- **tui**: add adaptive style primitives
+- **legacy**: add cleanup evidence runner
+- **legacy**: flush zero-use telemetry snapshots
+- **legacy**: add cleanup telemetry gate
+- **legacy**: persist cleanup telemetry snapshots
+- **legacy**: warn on deprecated paths
+- **legacy**: count component format usage
+- **legacy**: count mcp alias usage
+- **legacy**: count provider default usage
+- **legacy**: count uok fallback usage
+- **legacy**: count workflow engine usage
+- **legacy**: add cleanup telemetry counters
+- **process**: add process baseline metrics
+- **process**: recommend task paths by size
+- **refactor**: add contract drift baseline metrics
+- **refactor**: add phase 0 baseline harness
+
+### Fixed
+- **test**: align loop-deps mocks with slice 7's LoopDeps + WorktreeLifecycleDeps
+- drop accidentally-committed node_modules symlink
+- **gsd**: use truthy check for activeEngineId in Worktree Safety bypass
+- **gsd**: skip Worktree Safety check for custom-engine units
+- **test**: drop duplicate lifecycle key in custom-engine-loop-integration.test.ts
+- **gsd**: repoint orchestrator worktree adapter at new safety module
+- **auto**: tag session-transition aborts
+- **gsd-tui**: header lifecycle, scroll stability, and wizard step guidance
+- **gsd**: route claude code through session cwd
+- **gsd**: heal dangling write-gate state symlink
+- **gsd**: repair complete-milestone closeout drift
+- **gsd**: harden auto-mode closeout
+- **gsd**: use s.basePath for pre-execution file checks in worktree isolation
+- **gsd**: clean milestone squash conflict state
+- **gsd**: harden milestone merge closeout
+- **gsd**: recover stale milestone leases before dispatch
+- **gsd**: ignore stale Claude Code aborts after session switch
+- **tui**: render welcome header inside TUI
+- **gsd**: fast-forward reused milestone branch in parallel-orchestrator
+- **gsd**: wrap survivor-finalize merge in try/catch with clean abort
+- **gsd**: actively merge orphan completed milestone in bootstrap
+- **gsd**: enforce request-time tool scoping
+- **gsd**: skip fast-forward when reused branch is checked out in another worktree
+- **vscode**: report session tokens separately from context
+- **gsd**: handle already-restored files in orphan-stash audit
+- **gsd**: fast-forward reused milestone branch onto integration before re-attaching worktree
+- **gsd**: fail loud when branch-mode merge runs from wrong branch
+- **gsd**: rederive currentMilestoneId from orphan branches at bootstrap
+- **gsd**: always restore preflight stash after milestone merge
+- **gsd**: drop session-switch user-abort misclassification in agent-end recovery
+- **gsd**: scope loadEffectiveGSDPreferences to workspace basePath at two call sites
+- **gsd**: break pre-exec failure loop and improve planner guidance
+- **gsd**: avoid empty auto worktree dispatch
+- **gsd**: use explicit workspace roots
+- **gsd**: resolve dispatch unit before health checks
+- **gsd**: check worktree health before stuck detection
+- **gsd**: close auto recovery review gaps
+- **gsd**: harden auto-mode closeout recovery
+- **gsd**: defer discussion approval gate
+- **gsd**: skip runtime pre-exec inputs
+- **git-service**: drop missing keyFiles + fall back to smartStage
+- **memory-store**: honor include_superseded in no-query ranked path
+- **context-budget**: per-provider empirical cache + test reset hook
+- **memory-store**: decay-aware ranking + NaN guards on memoryDecayFactor
+- **gsd-db**: preserve content_hash + memory metadata in worktree reconcile
+- **auto**: handle initTokenCounter rejection to avoid unhandled promise
+- **test**: add last_hit_at to compaction-snapshot Memory fixtures
+- **memory-tools**: add last_hit_at to includeSupersededMemories Memory rows
+- address codex peer review medium findings
+- **gsd**: reacquire stale auto-mode leases
+- **token-counter**: warm tiktoken encoder at extension startup
+- **prompt-loader**: prime template cache synchronously after initResources
+- **memory-store**: cap LIKE fallback scan and warn on FTS5 unavailability
+- **gsd**: stop stale milestone completion replay
+- **gsd**: honor db-complete timeout recovery
+- **gsd**: pause stale execute-task recovery
+- **gsd**: prevent auto-mode session handoff exits
+- **gsd**: close context mode gaps
+- **compaction**: apply compaction_threshold_percent from GSD prefs (#5475)
+- **gsd**: prefer explicit projectRootOverride for worker registration
+- **pi-tui**: keep auto-mode tui anchored to bottom
+- **gsd**: recover migrated planning state into db
+- **gsd**: address crash recovery review
+- **gsd**: harden auto crash recovery
+- **gsd**: register worker before bootstrap milestone entry
+- **pi-coding-agent**: persist sql.js snapshots atomically (#5426)
+- **gsd**: dispatch quick task menu selection
+- **gsd**: preserve injected worktree health in auto tests
+- **gsd**: fail closed on invalid project classification
+- **gsd**: tighten validation coverage and classification reuse
+- **gsd**: tighten project detection and validation trust
+- **gsd**: address workflow closeout review findings
+- **gsd**: right-size planning and dedupe closeout
+- **gsd**: classify untyped projects and harden milestone cleanup
+- **tui**: roll up direct tool execution rows
+- **gsd**: keep detached auto-mode alive
+- **gsd**: stop complete projects from restarting deep setup
+- **tui**: preserve tool hook shutdown contract
+- **tui**: prevent lifecycle hooks from closing ui
+- **gsd**: bound milestone memory dedupe queries
+- **gsd**: backfill milestone commit attribution
+- **gsd**: honor implementation commits during milestone closeout
+- **gsd-extension**: enforce worktree-isolation contract on write/edit (#5199)
+- **tui**: update input controller host mock
+- **gsd**: tolerate missing working message UI hook
+- **tui**: clear stale adaptive error state
+- repair tui input and auto progress messaging
+- **docker-e2e**: build core before npm pack so tarball has dist/
+- **e2e harness**: isolate HOME per process to avoid CI ENOTEMPTY race
+- **e2e harness**: isolate HOME per process to avoid CI ENOTEMPTY race
+- **e2e harness**: isolate HOME per process to avoid CI ENOTEMPTY race
+- **e2e harness**: isolate HOME per process to avoid CI ENOTEMPTY race
+- **e2e harness**: isolate HOME per process to avoid CI ENOTEMPTY race
+- **docker-e2e**: bypass bin shim, use node + loader directly
+- **docker-e2e**: skip postinstall + verify bin shim at build time
+- **e2e,studio**: unbreak docker-e2e tarball + studio preload format
+- **gsd**: harden pr-evidence input against trailer/HTML-comment injection
+- **gsd**: restore ## Blockers section + add PR-body golden fixtures
+- **github-sync**: escape backticks in PR body inline-code spans
+- **gsd**: restore sidecar-dequeue-before-session-lock ordering
+- **pi-tui**: use actual cursor row for editor diffs
+- **gsd**: stop blocked custom workflow loops
+- **gsd**: provide prompt template path defaults
+- **build**: restore contracts build order for TUI paths
+- **refactor**: address auto loop review findings
+- **workflow**: narrow custom engine dispatch actions
+- **gsd**: quiet auto-mode warning noise
+- **gsd**: address pr review feedback
+- **gsd**: address gate progress review feedback
+- **gsd**: persist gate confirmations from mcp questions
+- **test**: accept since in changed src verifier
+- **gsd**: make milestone completion idempotent
+- **pi-tui**: use content-bottom baseline for diff cursor math
+- **pi-tui**: separate content cursor baseline from IME cursor row
+- **prompt**: use portable plan template paths
+- **prompt**: use portable task summary template path
+- **prompt**: resolve template paths dynamically
+
+### Changed
+- **gsd-extension**: retire _*ForTest suffix on production helpers
+- **gsd-extension**: retire *ByScope projection wrappers
+- **gsd-extension**: retire WorktreeResolver
+- **gsd-extension**: move merge logic from WorktreeResolver into Lifecycle
+- **gsd-extension**: wire Lifecycle → Projection on enter
+- **gsd-extension**: close Projection bypass for post-unit + phases
+- **gsd-extension**: move Projection bodies into WorktreeStateProjection
+- **gsd-extension**: WorktreeStateProjection.finalizeProjectionForMerge
+- **gsd**: wire worktree safety checks
+- **gsd**: add worktree safety contract
+- **gsd-extension**: WorktreeStateProjection.projectWorktreeToRoot
+- **gsd-extension**: WorktreeStateProjection skeleton + projectRootToWorktree
+- **gsd-extension**: add Lifecycle queries + degradeToBranchMode + restoreToProjectRoot
+- **gsd-extension**: WorktreeLifecycle.exitMilestone (delegating wrapper)
+- **gsd-extension**: implement ADR-015 runtime invariant modules
+- **agents**: add docs/agents/ config + docs/adr/ scaffold
+- **gsd-extension**: extract Worktree Lifecycle Module — enterMilestone
+- **gsd**: cap repeated workflow prompt context
+- **gsd**: make preExecRetryCount readonly, use .clear() in reset
+- **ci**: trim retired workflow paths
+- **triage**: enforce needs-triage at issue intake
+- **src**: group root files by concern
+- **src**: move headless runtime under src/headless
+- **src**: move extension runtime helpers
+- **web-services**: rename internal service layer
+- **process**: share github sync pr evidence
+- **process**: share pr evidence generation
+- **app-surface**: import state row contracts
+- **app-surface**: import renderer row contracts
+- **app-surface**: import verification task contract
+- **app-surface**: import task row contract
+- **app-surface**: import workflow row contracts
+- **db**: extract data-copy migration control
+- **db**: extract remaining ddl migration steps
+- **db**: extract early migration steps
+- **db**: extract migration backup helper
+- **db**: extract base schema ddl
+- **db**: extract lightweight query row mappers
+- **db**: extract milestone artifact gate row mappers
+- **db**: extract task slice row mappers
+- **db**: extract decision requirement row mappers
+- **db**: extract memory fts schema helper
+- **db**: extract verification evidence schema helper
+- **db**: extract coordination schema helper
+- **db**: extract runtime kv schema helper
+- **db**: centralize schema version metadata
+- **db**: extract schema metadata helpers
+- **db**: extract transaction runner
+- **db**: extract open status state
+- **db**: extract workspace connection cache
+- **db**: extract sqlite provider loader
+- **db**: extract sqlite adapter wrapper
+- **auto**: extract custom engine dispatch outcome
+- **auto**: extract custom engine verify outcomes
+- **auto**: extract custom engine reconcile outcome
+- **auto**: extract custom engine reconcile handling
+- **auto**: extract custom engine retry handling
+- **auto**: extract custom engine iteration data
+- **auto**: extract unit dispatch adapter
+- **auto**: extract sidecar iteration data
+- **auto**: extract memory pressure adapter
+- **auto**: extract worker heartbeat adapter
+- **auto**: extract session lock validation
+- **auto**: extract dispatch claim adapter
+- **auto**: extract custom verify retry store
+- **auto**: extract sidecar queue dequeue
+- **auto**: extract iteration completion cleanup
+- **auto**: extract dispatch ledger settles
+- **auto**: kernelize unit request timestamp
+- **auto**: kernelize custom engine path decision
+- **auto**: kernelize dispatch ledger summaries
+- **auto**: kernelize dispatch node kind
+- **auto**: extract workflow phase reporter
+- **auto**: extract workflow journal reporter
+- **auto**: kernelize model policy block
+- **auto**: kernelize infrastructure error stop
+- **auto**: kernelize custom engine retry recovery
+- **auto**: kernelize iteration error recovery
+- **auto**: kernelize cooldown recovery
+- **auto**: kernelize request throttle decision
+- **auto**: kernelize memory pressure stop
+- **auto**: extract workflow turn reporter
+- **auto**: kernelize engine reconcile decision
+- **auto**: kernelize finalize decisions
+- **auto**: kernelize engine dispatch decision
+- **auto**: kernelize dispatch claim decision
+- **auto**: route loop guards through kernel
+- **auto**: add pure workflow kernel decisions
+- **test**: surface phase 3 baseline metrics
+- **test**: add changed src test runner
+- **test**: cache dist-test compile artifacts
+- **prompt**: close phase 2 reduction gate
+- **prompt**: compact task execution guidance
+- **prompt**: compact headless discussion guidance
+- **prompt**: compact project bootstrap discussion guidance
+- **prompt**: compact project discussion guidance
+- **prompt**: compact slice planning guidance
+- **prompt**: compact queue discussion guidance
+- **prompt**: compact milestone discussion guidance
+- **prompt**: compact milestone completion guidance
+- **prompt**: compact milestone planning guidance
+- **prompt**: compact task execution guidance
+- **prompt**: compact forensics guidance
+- **prompt**: compact system guidance
+- **prompt**: compact requirements discussion guidance
+- **prompt**: compact project bootstrap guidance
+- **prompt**: compact headless discussion guidance
+- **prompt**: compact project discussion guidance
+- **prompt**: compact slice completion guidance
+- **prompt**: compact slice planning guidance
+- **prompt**: compact milestone planning guidance
+- **prompt**: compact queue guidance
+- **prompt**: compact task execution guidance
+- **prompt**: compact forensics guidance
+- **prompt**: compact interactive discussion guidance
+- **prompt**: compact gsd system guidance
+- **prompt**: compact headless discussion guidance
+- **prompt**: compact milestone completion guidance
+- **prompt**: compact requirements discussion guidance
+- **prompt**: compact project discussion guidance
+- **prompt**: compact milestone discussion guidance
+- **prompt**: compact project research guidance
+- **prompt**: compact capture triage guidance
+- **prompt**: compact milestone rethink guidance
+- **prompt**: compact worktree merge guidance
+- **prompt**: compact slice refinement guidance
+- **prompt**: compact slice research guidance
+- **prompt**: compact milestone validation guidance
+- **prompt**: compact slice discussion guidance
+- **prompt**: compact project research guidance
+- **prompt**: compact slice completion guidance
+- **prompt**: compact milestone completion guidance
+- **prompt**: compact requirements discussion guidance
+- **prompt**: compact slice planning guidance
+- **prompt**: compact milestone planning guidance
+- **prompt**: compact task execution guidance
+- **prompt**: compact queue milestone guidance
+- **prompt**: compact requirements discussion guidance
+- **prompt**: compact milestone completion guidance
+- **prompt**: compact milestone discussion guidance
+- **prompt**: compact project discussion guidance
+- **prompt**: compact forensic investigation guidance
+- **prompt**: compact queue discussion guidance
+- **prompt**: compact slice planning guidance
+- **prompt**: compact task execution guidance
+- **prompt**: compact milestone planning guidance
+- **prompt**: compact headless discussion guidance
+- **prompt**: compact discuss investigation guidance
+- **prompt**: compact src system guidance
+- **contracts**: share daemon rpc event types
+- **contracts**: share vscode stats and bash types
+- **contracts**: share web ui request types
+- **contracts**: share rpc event contract types
+- **contracts**: share workflow tool registry
+- **contracts**: share mcp blocker shape
+- **contracts**: share rpc state types with vscode
+- **contracts**: use shared rpc types in web bridge
+- **contracts**: introduce shared rpc contracts
+
 ## [2.80.0] - 2026-05-04
 
 ### Added
@@ -4033,7 +4341,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.80.0...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.81.0...HEAD
+[2.81.0]: https://github.com/gsd-build/gsd-2/compare/v2.80.0...v2.81.0
 [2.80.0]: https://github.com/gsd-build/gsd-2/compare/v2.79.0...v2.80.0
 [2.79.0]: https://github.com/gsd-build/gsd-2/compare/v2.78.1...v2.79.0
 [2.78.1]: https://github.com/gsd-build/gsd-2/compare/v2.78.0...v2.78.1

@@ -27,36 +27,43 @@ One command. Walk away. Come back to a built project with clean git history.
 
 ---
 
-## What's New in v2.80
+## What's New in v2.81
 
-### DB-Authoritative Context
+### Worktree Safety & Projection
 
-- **UOK contracts are DB-authoritative** — runtime contract state now flows through the database instead of file-first projections.
-- **Auto-run context mode fully wired** — context-mode execution is connected end-to-end for auto runs.
-- **Planned slice recovery** — planned slices recover correctly after artifact writes.
+- **Worktree safety is now fail-closed** — write/edit operations enforce the worktree-isolation contract, custom-engine bypasses are explicit, and invalid project classification no longer silently proceeds.
+- **Lifecycle and projection are split into dedicated modules** — worktree entry, exit, root projection, and merge finalization now flow through clearer boundaries.
+- **Milestone merge closeout is harder to wedge** — stale leases, orphaned preflight stashes, branch-mode drift, reused branches, and wrong-branch merges are detected or recovered more reliably.
 
-### Auto, Deep Mode & Gates
+### Memory, Context & Token Control
 
-- **Deep queued milestones continue** — deep project milestones can resume through queued work instead of stalling.
-- **Deep project registration** — deep project milestones are registered as part of the workflow.
-- **Depth-verification gate fixes** — gate workflow regressions were closed, including case-insensitive plan-slice artifact resolution.
-- **Task commits bound to milestone completion** — automated task commits now respect the milestone completion guard.
+- **Memory relevance improved** — artifacts now carry integrity fingerprints, memories track last-hit time, and relevance scoring uses time decay with safer fallback behavior.
+- **Provider tools are scoped per request** — tool availability is narrowed at request time, with provider-boundary token audit support.
+- **Prompt and workflow context got leaner** — repeated workflow context is capped, prompt templates use portable paths, and many high-volume workflow prompts were compacted.
 
-### MCP, Post-Exec & Cross-Platform
+### TUI & Operator Experience
 
-- **Post-exec import hardening** — explicit extension fallbacks, dotted module stems, React Router `+types`, and `+types` guards are handled more carefully.
-- **MCP write gating** — `gsd_exec` writes are gated, with Windows path-separator test coverage tightened.
-- **Project saves stay successful** — saving a project no longer fails just because registration fails.
-- **Home-directory fallback** — `currentDirectoryRoot` uses `homedir()` fallback behavior for better cross-platform consistency.
+- **Compact tool output is more useful** — compact cards show tool targets and low-signal tool output can roll up by phase.
+- **Terminal UI refreshed** — chat/tool cards align with the terminal design, adaptive refresher layouts landed, and the welcome/header lifecycle is more stable.
+- **Auto-mode stays anchored** — bottom anchoring, direct tool execution rollups, and lifecycle hook shutdown behavior were tightened.
 
-### Reliability & Review Hardening
+### Reliability, Tests & CI
 
-- **Auto orchestration seams and contracts** — orchestration boundaries were made more explicit and review feedback was folded in.
-- **Cancellation context preserved** — auto-mode pauses keep cancellation context instead of dropping it.
-- **Recovery stop lifecycle** — recovery stop now emits the expected lifecycle event.
-- **Trace and cleanup fixes** — trace correlation, cleanup-on-throw, audit context reset, and `onTurnResult` phase-result guards were tightened.
+- **Auto-mode recovery tightened** — crash recovery, session handoff, stale milestone completion replay, stale leases, and complete-project restart loops were all hardened.
+- **E2E coverage expanded** — real-process MCP, fake LLM, native ABI, schema migration, Docker runtime, Windows runner, and multi-iteration loop coverage landed.
+- **CI is faster and less noisy** — merge/build gates were simplified, expensive PR jobs are gated, and merge-conflict PRs skip heavy jobs.
 
-See the full [Changelog](./CHANGELOG.md) for the complete v2.80 entry and prior releases.
+See the full [Changelog](./CHANGELOG.md) for the complete v2.81 entry and prior releases.
+
+<details>
+<summary>v2.80 highlights</summary>
+
+- **DB-authoritative context** — UOK contracts moved through database-backed runtime state, auto-run context mode was wired end-to-end, and planned slices recover after artifact writes.
+- **Auto, deep mode, and gates** — deep queued milestones continue, deep project milestones register cleanly, depth-verification regressions were closed, and task commits respect the milestone completion guard.
+- **MCP, post-exec, and cross-platform hardening** — post-exec import fallback handling, React Router `+types` imports, `gsd_exec` write gating, project-save behavior, and home-directory fallback behavior were tightened.
+- **Reliability and review hardening** — auto orchestration contracts, cancellation context preservation, recovery stop lifecycle events, trace correlation, cleanup-on-throw, and phase-result guards were improved.
+
+</details>
 
 <details>
 <summary>v2.79 highlights</summary>
