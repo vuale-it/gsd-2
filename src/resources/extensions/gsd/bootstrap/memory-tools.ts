@@ -9,19 +9,13 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
-import { ensureDbOpen, safeWorkspaceCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
 import {
   executeGsdGraph,
   executeMemoryCapture,
   executeMemoryQuery,
 } from "../tools/memory-tools.js";
 
-function toolWorkspaceRoot(ctx: unknown): string {
-  if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
-    return (ctx as { cwd: string }).cwd;
-  }
-  return safeWorkspaceCwd();
-}
 
 export function registerMemoryTools(pi: ExtensionAPI): void {
   // ─── capture_thought ────────────────────────────────────────────────────
@@ -66,7 +60,7 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const ok = await ensureDbOpen(toolWorkspaceRoot(_ctx));
+      const ok = await ensureDbOpen(resolveCtxCwd(_ctx));
       if (!ok) {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot capture memory." }],
@@ -117,7 +111,7 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const ok = await ensureDbOpen(toolWorkspaceRoot(_ctx));
+      const ok = await ensureDbOpen(resolveCtxCwd(_ctx));
       if (!ok) {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot query memory." }],
@@ -158,7 +152,7 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
       ], { description: "Only include edges with this relation type" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const ok = await ensureDbOpen(toolWorkspaceRoot(_ctx));
+      const ok = await ensureDbOpen(resolveCtxCwd(_ctx));
       if (!ok) {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available." }],

@@ -815,6 +815,11 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       !existsSync(mergeHeadPath),
       "#2912: MERGE_HEAD must be cleaned up after merge conflict error",
     );
+    assert.equal(
+      run("git diff --name-only --diff-filter=U", repo),
+      "",
+      "squash conflict cleanup must clear unmerged index entries",
+    );
   });
 
   test("#2912: stale MERGE_HEAD from native merge is cleaned after successful commit", () => {

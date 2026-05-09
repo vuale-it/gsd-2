@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { Text } from "@gsd/pi-tui";
 
 import { loadEffectiveGSDPreferences } from "../preferences.js";
-import { ensureDbOpen, safeWorkspaceCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
 import { loadWriteGateSnapshot, shouldBlockRootArtifactSaveInSnapshot } from "./write-gate.js";
 import { StringEnum } from "@gsd/pi-ai";
 import { logError } from "../workflow-logger.js";
@@ -16,12 +16,6 @@ async function loadWorkflowExecutors(): Promise<typeof import("../tools/workflow
   return import("../tools/workflow-tool-executors.js");
 }
 
-function toolWorkspaceRoot(ctx: unknown): string {
-  if (ctx && typeof ctx === "object" && typeof (ctx as { cwd?: unknown }).cwd === "string") {
-    return (ctx as { cwd: string }).cwd;
-  }
-  return safeWorkspaceCwd();
-}
 
 /**
  * Register an alias tool that shares the same execute function as its canonical counterpart.
@@ -72,7 +66,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_decision_save (formerly gsd_save_decision) ─────────────────────
 
   const decisionSaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -160,7 +154,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_requirement_update (formerly gsd_update_requirement) ───────────
 
   const requirementUpdateExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const gateBlock = requirementRootWriteGuard("update_requirement", basePath);
     if (gateBlock) return gateBlock;
     const dbAvailable = await ensureDbOpen(basePath);
@@ -241,7 +235,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_requirement_save ─────────────────────────────────────────────
 
   const requirementSaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const gateBlock = requirementRootWriteGuard("save_requirement", basePath);
     if (gateBlock) return gateBlock;
     const dbAvailable = await ensureDbOpen(basePath);
@@ -345,7 +339,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const summarySaveExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSummarySave } = await loadWorkflowExecutors();
-    return executeSummarySave(params, toolWorkspaceRoot(_ctx));
+    return executeSummarySave(params, resolveCtxCwd(_ctx));
   };
 
   const summarySaveTool = {
@@ -396,7 +390,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneGenerateIdExecute = async (_toolCallId: string, _params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     try {
-      const basePath = toolWorkspaceRoot(_ctx);
+      const basePath = resolveCtxCwd(_ctx);
       // Claim a reserved ID if the guided-flow already previewed one to the user.
       // This guarantees the ID shown in the UI matches the one materialised on disk.
       const { claimReservedId, findMilestoneIds, getReservedMilestoneIds, nextMilestoneId } = await import("../guided-flow.js");
@@ -481,7 +475,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const planMilestoneExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executePlanMilestone } = await loadWorkflowExecutors();
-    return executePlanMilestone(params, toolWorkspaceRoot(_ctx));
+    return executePlanMilestone(params, resolveCtxCwd(_ctx));
   };
 
   const planMilestoneTool = {
@@ -551,7 +545,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const planSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executePlanSlice } = await loadWorkflowExecutors();
-    return executePlanSlice(params, toolWorkspaceRoot(_ctx));
+    return executePlanSlice(params, resolveCtxCwd(_ctx));
   };
 
   const planSliceTool = {
@@ -600,7 +594,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_plan_task (gsd_task_plan alias) ───────────────────────────────
 
   const planTaskExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -675,7 +669,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const taskCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeTaskComplete } = await loadWorkflowExecutors();
-    return executeTaskComplete(params, toolWorkspaceRoot(_ctx));
+    return executeTaskComplete(params, resolveCtxCwd(_ctx));
   };
 
   const taskCompleteTool = {
@@ -746,7 +740,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const sliceCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSliceComplete } = await loadWorkflowExecutors();
-    return executeSliceComplete(params, toolWorkspaceRoot(_ctx));
+    return executeSliceComplete(params, resolveCtxCwd(_ctx));
   };
 
   const sliceCompleteTool = {
@@ -846,7 +840,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_skip_slice (#3477 / #3487) ───────────────────────────────────
 
   const skipSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -939,7 +933,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneCompleteExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeCompleteMilestone } = await loadWorkflowExecutors();
-    return executeCompleteMilestone(params, toolWorkspaceRoot(_ctx));
+    return executeCompleteMilestone(params, resolveCtxCwd(_ctx));
   };
 
   const milestoneCompleteTool = {
@@ -985,7 +979,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const milestoneValidateExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeValidateMilestone } = await loadWorkflowExecutors();
-    return executeValidateMilestone(params, toolWorkspaceRoot(_ctx));
+    return executeValidateMilestone(params, resolveCtxCwd(_ctx));
   };
 
   const milestoneValidateTool = {
@@ -1023,7 +1017,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const replanSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeReplanSlice } = await loadWorkflowExecutors();
-    return executeReplanSlice(params, toolWorkspaceRoot(_ctx));
+    return executeReplanSlice(params, resolveCtxCwd(_ctx));
   };
 
   const replanSliceTool = {
@@ -1074,7 +1068,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const reassessRoadmapExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeReassessRoadmap } = await loadWorkflowExecutors();
-    return executeReassessRoadmap(params, toolWorkspaceRoot(_ctx));
+    return executeReassessRoadmap(params, resolveCtxCwd(_ctx));
   };
 
   const reassessRoadmapTool = {
@@ -1133,7 +1127,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // Single-writer v3, Stream 3: reversibility tools for closed units.
 
   const reopenTaskExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -1200,7 +1194,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_slice_reopen (gsd_reopen_slice alias) ─────────────────────────
 
   const reopenSliceExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -1267,7 +1261,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
   // ─── gsd_milestone_reopen (gsd_reopen_milestone alias) ─────────────────
 
   const reopenMilestoneExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
-    const basePath = toolWorkspaceRoot(_ctx);
+    const basePath = resolveCtxCwd(_ctx);
     const dbAvailable = await ensureDbOpen(basePath);
     if (!dbAvailable) {
       return {
@@ -1333,7 +1327,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
   const saveGateResultExecute = async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) => {
     const { executeSaveGateResult } = await loadWorkflowExecutors();
-    return executeSaveGateResult(params, toolWorkspaceRoot(_ctx));
+    return executeSaveGateResult(params, resolveCtxCwd(_ctx));
   };
 
   const saveGateResultTool = {

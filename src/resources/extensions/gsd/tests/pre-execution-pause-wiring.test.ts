@@ -486,6 +486,63 @@ describe("Pre-execution checks → pauseAuto wiring", () => {
     );
   });
 
+  test("files present in s.basePath (worktree) but absent from canonicalProjectRoot do not block", async () => {
+    // Regression: pre-exec checks used canonicalProjectRoot (project root), so
+    // files that a prior slice created in the worktree were falsely flagged as
+    // missing because they hadn't merged to main yet. Fix: use s.basePath.
+
+    // Create a separate "worktree" directory with the referenced files present.
+    const worktreeDir = join(tempDir, "worktree");
+    mkdirSync(join(worktreeDir, "lib"), { recursive: true });
+    mkdirSync(join(worktreeDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+    writeFileSync(join(worktreeDir, "lib", "types.ts"), "export type Habit = { id: string; name: string; };");
+    writeFileSync(join(worktreeDir, "lib", "useLocalStorage.ts"), "export function useLocalStorage() {}");
+
+    // The DB lives under tempDir (the "project root"). Insert slice + tasks.
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", risk: "low" });
+    insertTask({
+      id: "T01",
+      sliceId: "S01",
+      milestoneId: "M001",
+      title: "Task that reads prior-slice files",
+      status: "pending",
+      planning: {
+        description: "Reads lib/types.ts and lib/useLocalStorage.ts from prior slice",
+        estimate: "1h",
+        files: [],
+        verify: "npm test",
+        inputs: ["lib/types.ts", "lib/useLocalStorage.ts"],
+        expectedOutput: ["lib/utils.ts"],
+        observabilityImpact: "",
+      },
+      sequence: 0,
+    });
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const pauseAutoMock = mock.fn(async () => {});
+
+    // s.basePath = worktreeDir (files exist here)
+    // Override canonicalProjectRoot → tempDir (files do NOT exist there)
+    const s = makeMockSession(worktreeDir, { type: "plan-slice", id: "M001/S01" });
+    Object.defineProperty(s, "canonicalProjectRoot", { get: () => tempDir });
+
+    const pctx = makePostUnitContext(s, ctx, pi, pauseAutoMock);
+    const result = await postUnitPostVerification(pctx);
+
+    assert.equal(
+      pauseAutoMock.mock.callCount(),
+      0,
+      "pauseAuto should NOT be called when referenced files exist in s.basePath (worktree)",
+    );
+    assert.equal(
+      result,
+      "continue",
+      "postUnitPostVerification should return 'continue' when worktree files satisfy pre-exec inputs",
+    );
+  });
+
   test("uok gate runner persists pre-execution gate outcomes when enabled", async () => {
     writePreferences({
       enhanced_verification: true,

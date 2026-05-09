@@ -1345,10 +1345,11 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
         const strictMode = prefs?.enhanced_verification_strict === true;
 
-        // Run pre-execution checks against the canonical project root. In
-        // worktree isolation, s.basePath can point at a metadata-only worktree,
-        // while source files remain under the project root.
-        const preExecutionBasePath = s.canonicalProjectRoot;
+        // Run pre-execution checks against s.basePath — the actual checkout
+        // where prior-slice files were created.  In worktree isolation,
+        // s.canonicalProjectRoot is the project root and lacks files that a
+        // prior slice wrote to the worktree but hasn't merged to main yet.
+        const preExecutionBasePath = s.basePath;
         const result: PreExecutionResult = await runPreExecutionChecks(tasks, preExecutionBasePath);
 
         // Log summary to stderr in existing verification output format
