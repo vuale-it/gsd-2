@@ -138,4 +138,3 @@ test("bootstrap aborts before starting next milestone when completed orphan merg
     rmSync(base, { recursive: true, force: true });
   }
 });
-

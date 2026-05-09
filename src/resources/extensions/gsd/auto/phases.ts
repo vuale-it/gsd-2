@@ -293,11 +293,15 @@ export async function _runMilestoneMergeWithStashRestore(
   );
 
   let mergeError: unknown = null;
-  try {
-    deps.resolver.mergeAndExit(milestoneId, ctx.ui);
+  const exitResult = deps.lifecycle.exitMilestone(
+    milestoneId,
+    { merge: true },
+    ctx.ui,
+  );
+  if (exitResult.ok) {
     s.milestoneMergedInPhases = true;
-  } catch (mergeErr) {
-    mergeError = mergeErr;
+  } else {
+    mergeError = exitResult.cause ?? new Error(`exit ${exitResult.reason}`);
   }
 
   // Always attempt to restore the stashed working tree, even on merge error.
@@ -820,7 +824,7 @@ export async function runPreDispatch(
       const enterResult = deps.lifecycle.enterMilestone(mid, ctx.ui);
       if (!enterResult.ok && enterResult.reason === "lease-conflict") {
         await deps.pauseAuto(ctx, pi);
-        return { action: "break", reason: "lease-conflict" };
+        return { action: "break", reason: "milestone-lease-conflict" };
       }
     } else {
       // mid is undefined — no milestone to capture integration branch for

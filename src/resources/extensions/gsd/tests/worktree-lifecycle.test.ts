@@ -118,6 +118,10 @@ test("enterMilestone returns ok:true mode:worktree on successful create", () => 
     assert.equal(result.path, "/project/.gsd/worktrees/M001");
   }
   assert.equal(s.basePath, "/project/.gsd/worktrees/M001");
+  assert.equal(
+    deps.calls.filter((c) => c.fn === "invalidateAllCaches").length,
+    1,
+  );
 });
 
 test("enterMilestone returns ok:true mode:branch on successful branch fallback", () => {
@@ -294,4 +298,230 @@ test("enterMilestone returns ok:false reason:invalid-milestone-id on path traver
     assert.equal(separator.reason, "invalid-milestone-id");
     assert.ok(separator.cause instanceof Error);
   }
+});
+
+// ─── exitMilestone — typed-result contract ────────────────────────────────────
+
+test("exitMilestone throws when no resolverFactory is provided", () => {
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  assert.throws(
+    () => lifecycle.exitMilestone("M001", { merge: true }, ctx),
+    /requires a resolverFactory/,
+  );
+});
+
+test("exitMilestone delegates merge:true to Resolver.mergeAndExit and returns ok:true", () => {
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  let calledMid: string | null = null;
+  const fakeResolver = {
+    mergeAndExit: (mid: string) => {
+      calledMid = mid;
+      return { merged: false, codeFilesChanged: true };
+    },
+  };
+  const lifecycle = new WorktreeLifecycle(s, deps, () => fakeResolver as any);
+
+  const result = lifecycle.exitMilestone("M001", { merge: true }, ctx);
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.merged, false);
+    assert.equal(result.codeFilesChanged, true);
+  }
+  assert.equal(calledMid, "M001");
+});
+
+test("exitMilestone surfaces MergeConflictError as ok:false reason:merge-conflict", async () => {
+  const { MergeConflictError } = await import("../git-service.js");
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const conflict = new MergeConflictError(
+    ["src/foo.ts"],
+    "merge",
+    "milestone/M001",
+    "main",
+  );
+  const fakeResolver = {
+    mergeAndExit: () => {
+      throw conflict;
+    },
+  };
+  const lifecycle = new WorktreeLifecycle(s, deps, () => fakeResolver as any);
+
+  const result = lifecycle.exitMilestone("M001", { merge: true }, ctx);
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "merge-conflict");
+    assert.equal(result.cause, conflict);
+  }
+});
+
+test("exitMilestone wraps non-conflict throws as ok:false reason:teardown-failed", () => {
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const fsErr = new Error("EACCES: permission denied");
+  const fakeResolver = {
+    mergeAndExit: () => {
+      throw fsErr;
+    },
+  };
+  const lifecycle = new WorktreeLifecycle(s, deps, () => fakeResolver as any);
+
+  const result = lifecycle.exitMilestone("M001", { merge: true }, ctx);
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "teardown-failed");
+    assert.equal(result.cause, fsErr);
+  }
+});
+
+test("exitMilestone with merge:false delegates to Resolver.exitMilestone with preserveBranch", () => {
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  let receivedOpts: { preserveBranch?: boolean } | undefined;
+  const fakeResolver = {
+    exitMilestone: (
+      _mid: string,
+      _ctx: NotifyCtx,
+      opts?: { preserveBranch?: boolean },
+    ) => {
+      receivedOpts = opts;
+    },
+  };
+  const lifecycle = new WorktreeLifecycle(s, deps, () => fakeResolver as any);
+
+  const result = lifecycle.exitMilestone(
+    "M001",
+    { merge: false, preserveBranch: true },
+    ctx,
+  );
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.merged, false);
+  }
+  assert.deepEqual(receivedOpts, { preserveBranch: true });
+});
+
+// ─── Queries (issue #5587) ────────────────────────────────────────────────────
+
+test("isInMilestone returns true when session matches milestone id", () => {
+  const s = makeSession();
+  s.currentMilestoneId = "M001";
+  const lifecycle = new WorktreeLifecycle(s, makeDeps());
+
+  assert.equal(lifecycle.isInMilestone("M001"), true);
+  assert.equal(lifecycle.isInMilestone("M002"), false);
+});
+
+test("isInMilestone returns false when session has no active milestone", () => {
+  const s = makeSession();
+  s.currentMilestoneId = null;
+  const lifecycle = new WorktreeLifecycle(s, makeDeps());
+
+  assert.equal(lifecycle.isInMilestone("M001"), false);
+});
+
+test("getCurrentMilestoneIfAny returns the active milestone id or null", () => {
+  const s = makeSession();
+  s.currentMilestoneId = "M042";
+  const lifecycle = new WorktreeLifecycle(s, makeDeps());
+
+  assert.equal(lifecycle.getCurrentMilestoneIfAny(), "M042");
+
+  s.currentMilestoneId = null;
+  assert.equal(lifecycle.getCurrentMilestoneIfAny(), null);
+});
+
+// ─── degradeToBranchMode (issue #5587) ────────────────────────────────────────
+
+test("degradeToBranchMode sets isolationDegraded and invokes branch-mode helper", () => {
+  const s = makeSession();
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  lifecycle.degradeToBranchMode("M001", ctx);
+
+  assert.equal(s.isolationDegraded, true);
+  assert.equal(
+    deps.calls.filter((c) => c.fn === "enterBranchModeForMilestone").length,
+    1,
+  );
+  assert.equal(deps.calls.filter((c) => c.fn === "invalidateAllCaches").length, 1);
+});
+
+test("degradeToBranchMode is no-op when isolationDegraded is already true", () => {
+  const s = makeSession();
+  s.isolationDegraded = true;
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  lifecycle.degradeToBranchMode("M001", ctx);
+
+  assert.equal(
+    deps.calls.filter((c) => c.fn === "enterBranchModeForMilestone").length,
+    0,
+  );
+});
+
+test("degradeToBranchMode marks degraded and notifies on branch-mode failure", () => {
+  const s = makeSession();
+  const deps = makeDeps({
+    enterBranchModeForMilestone: () => {
+      throw new Error("checkout failed");
+    },
+  });
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  lifecycle.degradeToBranchMode("M001", ctx);
+
+  assert.equal(s.isolationDegraded, true);
+  assert.ok(
+    ctx.messages.some(
+      (m) => m.level === "warning" && m.msg.includes("Branch isolation setup"),
+    ),
+  );
+});
+
+// ─── restoreToProjectRoot (issue #5587) ───────────────────────────────────────
+
+test("restoreToProjectRoot restores basePath to originalBasePath and rebuilds git service", () => {
+  const s = makeSession();
+  s.originalBasePath = "/project";
+  s.basePath = "/project/.gsd/worktrees/M001";
+  const deps = makeDeps();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  lifecycle.restoreToProjectRoot();
+
+  assert.equal(s.basePath, "/project");
+  assert.equal(deps.calls.filter((c) => c.fn === "GitServiceImpl").length, 1);
+  assert.equal(deps.calls.filter((c) => c.fn === "invalidateAllCaches").length, 1);
+});
+
+test("restoreToProjectRoot is no-op when originalBasePath is empty", () => {
+  const s = makeSession();
+  s.originalBasePath = "";
+  s.basePath = "/some/path";
+  const deps = makeDeps();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  lifecycle.restoreToProjectRoot();
+
+  assert.equal(s.basePath, "/some/path"); // unchanged
+  assert.equal(deps.calls.filter((c) => c.fn === "GitServiceImpl").length, 0);
 });

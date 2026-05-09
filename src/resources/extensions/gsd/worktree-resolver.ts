@@ -106,6 +106,11 @@ export interface WorktreeResolverDeps {
   ) => void;
 }
 
+export interface MergeAndExitResult {
+  merged: boolean;
+  codeFilesChanged: boolean;
+}
+
 // ─── Notify Context ────────────────────────────────────────────────────────
 
 export interface NotifyCtx {
@@ -307,7 +312,7 @@ export class WorktreeResolver {
    * Error recovery: on merge failure, always restore `s.basePath` to
    * `s.originalBasePath` and `process.chdir(s.originalBasePath)`.
    */
-  mergeAndExit(milestoneId: string, ctx: NotifyCtx): void {
+  mergeAndExit(milestoneId: string, ctx: NotifyCtx): MergeAndExitResult {
     this.validateMilestoneId(milestoneId);
 
     // Anchor cwd at the project root before any merge work. Some merge code
@@ -350,7 +355,7 @@ export class WorktreeResolver {
         `Skipping worktree merge for ${milestoneId} — isolation was degraded (worktree creation failed earlier). Work is on the current branch.`,
         "info",
       );
-      return;
+      return { merged: false, codeFilesChanged: false };
     }
 
     const mode = this.deps.getIsolationMode(this.s.originalBasePath || this.s.basePath);
@@ -381,27 +386,30 @@ export class WorktreeResolver {
         skipped: true,
         reason: "mode-none",
       });
-      return;
+      return { merged: false, codeFilesChanged: false };
     }
 
-    let actuallyMerged = false;
+    let mergeResult: MergeAndExitResult = {
+      merged: false,
+      codeFilesChanged: false,
+    };
     if (
       mode === "worktree" || inWorktree
     ) {
-      actuallyMerged = this._mergeWorktreeMode(milestoneId, ctx);
+      mergeResult = this._mergeWorktreeMode(milestoneId, ctx);
     } else if (mode === "branch") {
-      actuallyMerged = this._mergeBranchMode(milestoneId, ctx);
+      mergeResult = this._mergeBranchMode(milestoneId, ctx);
     }
 
     // The remainder of this function emits telemetry and runs re-squash.
-    // Both are gated on actuallyMerged — if the _merge* helper took a
+    // Both are gated on mergeResult.merged — if the _merge* helper took a
     // no-merge path (missing originalBase, no roadmap, wrong branch) the
     // milestone branch was intentionally left unmerged and we must not
     // emit a worktree-merged event or collapse commits on main.
-    if (!actuallyMerged) {
+    if (!mergeResult.merged) {
       // Always clear the start-SHA tracker to avoid leaking across sessions.
       this.s.milestoneStartShas.delete(milestoneId);
-      return;
+      return mergeResult;
     }
 
     // #4765 — when collapse_cadence=slice AND milestone_resquash=true, the
@@ -452,11 +460,12 @@ export class WorktreeResolver {
         error: telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr),
       });
     }
+    return mergeResult;
   }
 
   /** Worktree-mode merge: read roadmap, merge, teardown, reset paths.
-   *  Returns true when a squash-merge actually ran (false on skip paths). */
-  private _mergeWorktreeMode(milestoneId: string, ctx: NotifyCtx): boolean {
+   *  Returns merge metadata when a squash-merge actually ran. */
+  private _mergeWorktreeMode(milestoneId: string, ctx: NotifyCtx): MergeAndExitResult {
     const originalBase = this.s.originalBasePath;
     if (!originalBase) {
       debugLog("WorktreeResolver", {
@@ -466,10 +475,11 @@ export class WorktreeResolver {
         skipped: true,
         reason: "missing-original-base",
       });
-      return false;
+      return { merged: false, codeFilesChanged: false };
     }
 
     let merged = false;
+    let codeFilesChanged = false;
     try {
       const { synced } = this.deps.syncWorktreeStateBack(
         originalBase,
@@ -519,6 +529,7 @@ export class WorktreeResolver {
           roadmapContent,
         );
         merged = true;
+        codeFilesChanged = mergeResult.codeFilesChanged;
 
         // #2945 Bug 3: mergeMilestoneToMain performs best-effort worktree
         // cleanup internally (step 12), but it can silently fail on Windows
@@ -622,12 +633,12 @@ export class WorktreeResolver {
       result: "done",
       basePath: this.s.basePath,
     });
-    return merged;
+    return { merged, codeFilesChanged };
   }
 
   /** Branch-mode merge: check current branch, merge if on milestone branch.
-   *  Returns true when a merge actually ran (false on skip paths). */
-  private _mergeBranchMode(milestoneId: string, ctx: NotifyCtx): boolean {
+   *  Returns merge metadata when a merge actually ran. */
+  private _mergeBranchMode(milestoneId: string, ctx: NotifyCtx): MergeAndExitResult {
     try {
       const currentBranch = this.deps.getCurrentBranch(this.s.basePath);
       const milestoneBranch = this.deps.autoWorktreeBranch(milestoneId);
@@ -683,7 +694,7 @@ export class WorktreeResolver {
           skipped: true,
           reason: "no-roadmap",
         });
-        return false;
+        return { merged: false, codeFilesChanged: false };
       }
 
       const roadmapContent = this.deps.readFileSync(roadmapPath, "utf-8");
@@ -714,7 +725,7 @@ export class WorktreeResolver {
         mode: "branch",
         result: "success",
       });
-      return true;
+      return { merged: true, codeFilesChanged: mergeResult.codeFilesChanged };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       debugLog("WorktreeResolver", {

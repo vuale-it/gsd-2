@@ -29,6 +29,8 @@ import {
   refreshMilestoneLease,
   releaseMilestoneLease,
 } from "./db/milestone-leases.js";
+import { MergeConflictError } from "./git-service.js";
+import type { WorktreeResolver } from "./worktree-resolver.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -73,6 +75,10 @@ export type EnterResult =
         | "invalid-milestone-id";
       cause?: unknown;
     };
+
+export type ExitResult =
+  | { ok: true; merged: boolean; codeFilesChanged: boolean }
+  | { ok: false; reason: "merge-conflict" | "teardown-failed"; cause?: unknown };
 
 // ─── Validation ──────────────────────────────────────────────────────────
 
@@ -325,6 +331,7 @@ export function _enterMilestoneCore(
 
     s.basePath = wtPath;
     rebuildGitService(s, deps);
+    deps.invalidateAllCaches();
 
     debugLog("WorktreeLifecycle", {
       action: "enterMilestone",
@@ -408,13 +415,16 @@ function rebuildGitService(
 export class WorktreeLifecycle {
   private readonly s: AutoSession;
   private readonly deps: WorktreeLifecycleDeps;
+  private readonly resolverFactory?: () => WorktreeResolver;
 
   constructor(
     s: AutoSession,
     deps: WorktreeLifecycleDeps,
+    resolverFactory?: () => WorktreeResolver,
   ) {
     this.s = s;
     this.deps = deps;
+    this.resolverFactory = resolverFactory;
   }
 
   /**
@@ -427,5 +437,132 @@ export class WorktreeLifecycle {
    */
   enterMilestone(milestoneId: string, ctx: NotifyCtx): EnterResult {
     return _enterMilestoneCore(this.s, this.deps, milestoneId, ctx);
+  }
+
+  /**
+   * Exit the current worktree. With `opts.merge === true`, runs the full
+   * merge-and-teardown path (worktree-mode or branch-mode auto-detected).
+   * With `opts.merge === false`, runs auto-commit and teardown without
+   * merging to main.
+   *
+   * Returns a typed `ExitResult`. `MergeConflictError` is surfaced as
+   * `{ ok: false, reason: "merge-conflict", cause }` instead of thrown,
+   * giving callers a typed branch for the expected failure path.
+   * Unexpected failures (filesystem, git permissions, etc.) are wrapped
+   * as `{ ok: false, reason: "teardown-failed", cause }` so callers always
+   * receive a discriminated union — no exceptions for any expected outcome.
+   *
+   * Issue #5586 ships this as a delegating wrapper around
+   * `WorktreeResolver.mergeAndExit`/`exitMilestone`. The full extraction
+   * (~500 lines of merge logic across `_mergeWorktreeMode` and
+   * `_mergeBranchMode`) happens in #5587 when `WorktreeResolver` retires.
+   * The delegating shape preserves caller migration without rewriting
+   * merge-conflict handling mid-flight.
+   *
+   * Merge metadata is returned by `WorktreeResolver` while delegation is in
+   * place; #5587 will keep this contract when the merge logic moves into
+   * the Module.
+   */
+  exitMilestone(
+    milestoneId: string,
+    opts: { merge: boolean; preserveBranch?: boolean },
+    ctx: NotifyCtx,
+  ): ExitResult {
+    if (!this.resolverFactory) {
+      throw new Error(
+        "WorktreeLifecycle.exitMilestone requires a resolverFactory until #5587 retires WorktreeResolver",
+      );
+    }
+    const resolver = this.resolverFactory();
+    if (opts.merge) {
+      try {
+        const result = resolver.mergeAndExit(milestoneId, ctx);
+        return {
+          ok: true,
+          merged: result.merged,
+          codeFilesChanged: result.codeFilesChanged,
+        };
+      } catch (err) {
+        if (err instanceof MergeConflictError) {
+          return { ok: false, reason: "merge-conflict", cause: err };
+        }
+        return { ok: false, reason: "teardown-failed", cause: err };
+      }
+    }
+    try {
+      resolver.exitMilestone(milestoneId, ctx, {
+        preserveBranch: opts.preserveBranch,
+      });
+      return { ok: true, merged: false, codeFilesChanged: false };
+    } catch (err) {
+      return { ok: false, reason: "teardown-failed", cause: err };
+    }
+  }
+
+  /**
+   * Fall back to branch-mode for `milestoneId` after a failed worktree
+   * creation, marking the session's isolation as degraded.
+   *
+   * Currently delegates to `enterBranchModeForMilestone` from auto-worktree.
+   * Idempotent: subsequent calls in a degraded session are no-ops.
+   *
+   * Issue #5587 ships this as a thin adapter; the body extraction joins the
+   * other merge-logic move-out in a follow-up cleanup slice.
+   */
+  degradeToBranchMode(milestoneId: string, ctx: NotifyCtx): void {
+    if (this.s.isolationDegraded) {
+      debugLog("WorktreeLifecycle", {
+        action: "degradeToBranchMode",
+        milestoneId,
+        skipped: true,
+        reason: "already-degraded",
+      });
+      return;
+    }
+    const basePath = resolveWorktreeProjectRoot(
+      this.s.basePath,
+      this.s.originalBasePath,
+    );
+    try {
+      this.deps.enterBranchModeForMilestone(basePath, milestoneId);
+      this.deps.invalidateAllCaches();
+      this.s.isolationDegraded = true;
+      ctx.notify(
+        `Switched to branch milestone/${milestoneId} (isolation degraded).`,
+        "info",
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.notify(
+        `Branch isolation setup for ${milestoneId} failed: ${msg}. Continuing on current branch.`,
+        "warning",
+      );
+      this.s.isolationDegraded = true;
+    }
+  }
+
+  /**
+   * Restore `s.basePath` to `s.originalBasePath` and rebuild `s.gitService`.
+   * No-op when `originalBasePath` is empty (fresh sessions).
+   *
+   * Used by error/cleanup paths that need the session to behave as if the
+   * worktree was never entered. Does NOT teardown the worktree directory —
+   * callers that need teardown go through `exitMilestone({ merge: false })`.
+   */
+  restoreToProjectRoot(): void {
+    if (!this.s.originalBasePath) return;
+    this.s.basePath = this.s.originalBasePath;
+    rebuildGitService(this.s, this.deps);
+    this.deps.invalidateAllCaches();
+  }
+
+  /** True if `milestoneId` is the session's currently-active milestone. */
+  isInMilestone(milestoneId: string): boolean {
+    return this.s.currentMilestoneId === milestoneId;
+  }
+
+  /** The active milestone id, or `null` if no milestone is active. */
+  getCurrentMilestoneIfAny(): string | null {
+    return this.s.currentMilestoneId;
   }
 }

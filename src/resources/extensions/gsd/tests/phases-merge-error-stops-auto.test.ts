@@ -79,10 +79,14 @@ const ic = {
       calls.push("postflight");
       return { ok: true, needsManualRecovery: false };
     },
-    resolver: {
-      mergeAndExit() {
+    lifecycle: {
+      exitMilestone() {
         calls.push("merge");
-        throw new Error("remote rejected push");
+        return {
+          ok: false,
+          reason: "teardown-failed",
+          cause: new Error("remote rejected push"),
+        };
       },
     },
     async stopAuto(_ctx: unknown, _pi: unknown, reason?: string) {
