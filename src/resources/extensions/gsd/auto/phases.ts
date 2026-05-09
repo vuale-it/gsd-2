@@ -817,7 +817,11 @@ export async function runPreDispatch(
       if (deps.getIsolationMode(s.basePath) !== "none") {
         deps.captureIntegrationBranch(s.basePath, mid);
       }
-      deps.resolver.enterMilestone(mid, ctx.ui);
+      const enterResult = deps.lifecycle.enterMilestone(mid, ctx.ui);
+      if (!enterResult.ok && enterResult.reason === "lease-conflict") {
+        await deps.pauseAuto(ctx, pi);
+        return { action: "break", reason: "lease-conflict" };
+      }
     } else {
       // mid is undefined — no milestone to capture integration branch for
     }

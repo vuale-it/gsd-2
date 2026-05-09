@@ -45,6 +45,9 @@ export const BUDGET_THRESHOLDS: Array<{
  */
 export interface AgentEndEvent {
   messages: unknown[];
+  sessionId?: string;
+  turnId?: string;
+  abortOrigin?: "session-transition" | "user" | "timeout" | "unknown";
 }
 
 /**

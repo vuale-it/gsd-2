@@ -240,6 +240,10 @@ import { resolveUokFlags } from "./uok/flags.js";
 import { validateDirectory } from "./validate-directory.js";
 import { createAutoOrchestrator } from "./auto/orchestrator.js";
 import type { AutoOrchestrationModule, AutoOrchestratorDeps } from "./auto/contracts.js";
+import { reconcileBeforeDispatch } from "./state-reconciliation.js";
+import { compileUnitToolContract } from "./tool-contract.js";
+import { prepareUnitRoot } from "./worktree-safety.js";
+import { classifyFailure } from "./recovery-classification.js";
 // Slice-level parallelism (#2340)
 import { getEligibleSlices } from "./slice-parallel-eligibility.js";
 import { startSliceParallel } from "./slice-parallel-orchestrator.js";
@@ -247,6 +251,10 @@ import {
   WorktreeResolver,
   type WorktreeResolverDeps,
 } from "./worktree-resolver.js";
+import {
+  WorktreeLifecycle,
+  type WorktreeLifecycleDeps,
+} from "./worktree-lifecycle.js";
 import { reorderForCaching } from "./prompt-ordering.js";
 import { initTokenCounter } from "./token-counter.js";
 
@@ -1583,6 +1591,32 @@ function buildResolver(): WorktreeResolver {
 }
 
 /**
+ * Build a WorktreeLifecycle Module wrapping the current session.
+ *
+ * Per ADR-016, the Lifecycle Module is the typed-Interface owner of milestone
+ * entry/exit verbs. Phase 1 (issue #5585) ships only `enterMilestone`; the
+ * remaining verbs migrate from `WorktreeResolver` in subsequent slices.
+ *
+ */
+function buildLifecycleDeps(): WorktreeLifecycleDeps {
+  const deps = buildResolverDeps();
+  return {
+    enterAutoWorktree: deps.enterAutoWorktree,
+    createAutoWorktree: deps.createAutoWorktree,
+    enterBranchModeForMilestone: deps.enterBranchModeForMilestone,
+    getAutoWorktreePath: deps.getAutoWorktreePath,
+    getIsolationMode: deps.getIsolationMode,
+    invalidateAllCaches: deps.invalidateAllCaches,
+    GitServiceImpl: deps.GitServiceImpl,
+    loadEffectiveGSDPreferences: deps.loadEffectiveGSDPreferences,
+  };
+}
+
+function buildLifecycle(): WorktreeLifecycle {
+  return new WorktreeLifecycle(s, buildLifecycleDeps());
+}
+
+/**
  * Thin entry glue for the new Auto Orchestration module.
  *
  * This intentionally wires only dispatch + error notification today, with
@@ -1599,9 +1633,26 @@ export function createWiredAutoOrchestrationModule(
   let seq = 0;
 
   const deps: AutoOrchestratorDeps = {
+    stateReconciliation: {
+      async reconcileBeforeDispatch() {
+        const result = await reconcileBeforeDispatch(dispatchBasePath);
+        if (!result.ok) {
+          return {
+            ok: false,
+            reason: result.reason,
+            stateSnapshot: result.stateSnapshot,
+          };
+        }
+        return {
+          ok: true,
+          reason: result.repaired.join(", "),
+          stateSnapshot: result.stateSnapshot,
+        };
+      },
+    },
     dispatch: {
-      async decideNextUnit() {
-        const state = await deriveState(dispatchBasePath);
+      async decideNextUnit(input) {
+        const state = input.stateSnapshot;
         const active = state.activeMilestone;
         if (!active) return null;
 
@@ -1625,12 +1676,23 @@ export function createWiredAutoOrchestrationModule(
     },
     recovery: {
       async classifyAndRecover(input) {
-        const reason = input.error instanceof Error ? input.error.message : String(input.error ?? "unknown auto error");
-        return { action: "escalate" as const, reason };
+        const recovery = classifyFailure(input);
+        return { action: recovery.action, reason: recovery.reason };
+      },
+    },
+    toolContract: {
+      async compileUnitToolContract(unitType) {
+        const result = compileUnitToolContract(unitType);
+        if (!result.ok) return { ok: false, reason: result.detail };
+        return { ok: true, reason: result.contract.validationRules.join(", ") };
       },
     },
     worktree: {
-      async prepareForUnit() {},
+      async prepareForUnit(unitType, unitId) {
+        const result = prepareUnitRoot(unitType, unitId, { basePath: dispatchBasePath });
+        if (!result.ok) return { ok: false, reason: result.detail };
+        return { ok: true, reason: result.reason };
+      },
       async syncAfterUnit() {},
       async cleanupOnStop() {},
     },
@@ -1826,6 +1888,9 @@ function buildLoopDeps(pi: ExtensionAPI): LoopDeps {
 
     // WorktreeResolver
     resolver: buildResolver(),
+
+    // Worktree Lifecycle Module (ADR-016)
+    lifecycle: buildLifecycle(),
 
     // Post-unit processing
     postUnitPreVerification,
@@ -2130,9 +2195,17 @@ export async function startAuto(
       !detectWorktreeName(s.basePath) &&
       !detectWorktreeName(s.originalBasePath)
     ) {
-      buildResolver().enterMilestone(s.currentMilestoneId, {
+      const enterResult = buildLifecycle().enterMilestone(s.currentMilestoneId, {
         notify: ctx.ui.notify.bind(ctx.ui),
       });
+      if (!enterResult.ok && enterResult.reason === "lease-conflict") {
+        ctx.ui.notify(
+          `Cannot resume milestone ${s.currentMilestoneId}: lease is held by another worker.`,
+          "error",
+        );
+        await stopAuto(ctx, pi, "lease-conflict during resume");
+        return;
+      }
       // s.basePath may have been updated to a worktree path by enterMilestone.
       rebuildScope(s.basePath, s.currentMilestoneId);
     }
@@ -2236,6 +2309,7 @@ export async function startAuto(
     registerSigtermHandler,
     lockBase,
     buildResolver,
+    buildLifecycle,
   };
 
   // Register the worker before bootstrap enters a milestone worktree.

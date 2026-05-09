@@ -2,7 +2,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
-import type { ErrorContext } from "../auto/types.js";
+import type { AgentEndEvent, ErrorContext } from "../auto/types.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   checkDeepProjectSetupAfterTurn,
@@ -21,6 +21,7 @@ import {
   resolveAgentEnd,
   resolveAgentEndCancelled,
 } from "../auto/resolve.js";
+import { shouldIgnoreAgentEndForActiveUnit } from "../auto/unit-runner-events.js";
 import { resolveModelId } from "../auto-model-selection.js";
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
@@ -36,6 +37,10 @@ import { blockModel, isModelBlocked } from "../blocked-models.js";
 
 const retryState = createRetryState();
 const MAX_NETWORK_RETRIES = 2;
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object";
+}
 /**
  * Cap on auto-resume attempts for sustained transient-provider errors.
  *
@@ -116,6 +121,14 @@ export function isClaudeCodeSessionSwitchAbortMessage(lastMsg: unknown): boolean
   }
 
   return false;
+}
+
+export function isBareClaudeCodeStreamAbortPlaceholder(lastMsg: unknown): boolean {
+  if (!lastMsg || typeof lastMsg !== "object") return false;
+  const m = lastMsg as { stopReason?: unknown; errorMessage?: unknown; content?: unknown };
+  if (m.stopReason !== "aborted" || m.errorMessage) return false;
+  const text = readAssistantTextContent(m.content).trim().replace(/\s+/g, " ").toLowerCase();
+  return text === "claude code stream aborted by caller";
 }
 
 /**
@@ -215,7 +228,7 @@ async function pauseTransientWithBackoff(
 
 export async function handleAgentEnd(
   pi: ExtensionAPI,
-  event: { messages: any[] },
+  event: AgentEndEvent,
   ctx: ExtensionContext,
 ): Promise<void> {
   // #4648 — Invalidate the directory-listing cache before any artifact-existence
@@ -257,6 +270,10 @@ export async function handleAgentEnd(
 
   if (!isAutoActive()) return;
 
+  if (shouldIgnoreAgentEndForActiveUnit(event)) {
+    return;
+  }
+
   const lastMsg = event.messages[event.messages.length - 1];
   if (isSessionSwitchInFlight()) {
     _handleSessionSwitchAgentEnd(lastMsg, resolveAgentEndCancelled);
@@ -270,7 +287,14 @@ export async function handleAgentEnd(
     return;
   }
 
-  if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "aborted") {
+  if (isBareClaudeCodeStreamAbortPlaceholder(lastMsg)) {
+    // The Claude Code adapter can emit this placeholder after a prior turn has
+    // already completed and the next unit is active. It has no user/provider
+    // diagnostic value and must not cancel the newly-dispatched unit.
+    return;
+  }
+
+  if (isObjectRecord(lastMsg) && "stopReason" in lastMsg && lastMsg.stopReason === "aborted") {
     // Empty content with aborted stopReason is a non-fatal agent stop (the LLM
     // chose to end without producing output). Only pause on genuine fatal aborts
     // that carry error context — e.g. errorMessage field or non-empty content
@@ -296,7 +320,7 @@ export async function handleAgentEnd(
     await pauseAuto(ctx, pi, _buildAbortedPauseContext(lastMsg as { errorMessage?: unknown }));
     return;
   }
-  if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "error") {
+  if (isObjectRecord(lastMsg) && "stopReason" in lastMsg && lastMsg.stopReason === "error") {
     // #3588: errorMessage can be useless (e.g. "success") while the real error
     // is in the assistant message text content. Fall back to content when
     // errorMessage looks uninformative.

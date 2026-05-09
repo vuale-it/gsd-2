@@ -8,6 +8,7 @@ import {
   type WorktreeResolverDeps,
   type NotifyCtx,
 } from "../worktree-resolver.js";
+import { WorktreeLifecycle } from "../worktree-lifecycle.js";
 import { AutoSession } from "../auto/session.js";
 import type { JournalEntry } from "../journal.js";
 
@@ -102,7 +103,7 @@ describe("worktree journal events", () => {
     const deps = makeDeps({ getAutoWorktreePath: () => null });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.enterMilestone("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
     const enter = entries.find(e => e.eventType === "worktree-enter");
@@ -119,7 +120,7 @@ describe("worktree journal events", () => {
     });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.enterMilestone("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
     const enter = entries.find(e => e.eventType === "worktree-enter");
@@ -132,7 +133,7 @@ describe("worktree journal events", () => {
     const deps = makeDeps({ shouldUseWorktreeIsolation: () => false, getIsolationMode: () => "none" });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.enterMilestone("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
     const skip = entries.find(e => e.eventType === "worktree-skip");
@@ -149,7 +150,7 @@ describe("worktree journal events", () => {
     });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.enterMilestone("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
     const failed = entries.find(e => e.eventType === "worktree-create-failed");
@@ -210,7 +211,7 @@ describe("worktree journal events", () => {
     const deps = makeDeps({ shouldUseWorktreeIsolation: () => false });
     const resolver = new WorktreeResolver(s, deps);
 
-    resolver.enterMilestone("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
     assert.ok(entries.length > 0, "at least one entry should exist");

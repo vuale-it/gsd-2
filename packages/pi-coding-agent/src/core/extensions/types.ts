@@ -9,6 +9,7 @@
  */
 
 import type {
+	AgentAbortOrigin,
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
@@ -561,12 +562,17 @@ export interface BeforeAgentStartEvent {
 /** Fired when an agent loop starts */
 export interface AgentStartEvent {
 	type: "agent_start";
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired when an agent loop ends */
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
+	sessionId?: string;
+	turnId?: string;
+	abortOrigin?: AgentAbortOrigin;
 }
 
 /**
@@ -578,6 +584,9 @@ export interface StopEvent {
 	type: "stop";
 	reason: "completed" | "cancelled" | "error" | "blocked";
 	lastMessage?: AgentMessage;
+	sessionId?: string;
+	turnId?: string;
+	abortOrigin?: AgentAbortOrigin;
 }
 
 /**
@@ -767,6 +776,8 @@ export interface TurnStartEvent {
 	type: "turn_start";
 	turnIndex: number;
 	timestamp: number;
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired at the end of each turn */
@@ -775,12 +786,16 @@ export interface TurnEndEvent {
 	turnIndex: number;
 	message: AgentMessage;
 	toolResults: ToolResultMessage[];
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired when a message starts (user, assistant, or toolResult) */
 export interface MessageStartEvent {
 	type: "message_start";
 	message: AgentMessage;
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired during assistant message streaming with token-by-token updates */
@@ -788,12 +803,16 @@ export interface MessageUpdateEvent {
 	type: "message_update";
 	message: AgentMessage;
 	assistantMessageEvent: AssistantMessageEvent;
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired when a message ends */
 export interface MessageEndEvent {
 	type: "message_end";
 	message: AgentMessage;
+	sessionId?: string;
+	turnId?: string;
 }
 
 /** Fired when a tool starts executing */

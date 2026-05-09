@@ -10,6 +10,7 @@ import {
   type WorktreeResolverDeps,
   type NotifyCtx,
 } from "../worktree-resolver.js";
+import { WorktreeLifecycle } from "../worktree-lifecycle.js";
 import { AutoSession } from "../auto/session.js";
 import {
   closeDatabase,
@@ -258,7 +259,7 @@ test("enterMilestone creates new worktree when none exists", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project/.gsd/worktrees/M001");
   assert.equal(findCalls(deps.calls, "createAutoWorktree").length, 1);
@@ -279,7 +280,7 @@ test("enterMilestone enters existing worktree instead of creating", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project/.gsd/worktrees/M001");
   assert.equal(findCalls(deps.calls, "enterAutoWorktree").length, 1);
@@ -294,7 +295,7 @@ test("enterMilestone is no-op when isolation mode is none", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project"); // unchanged
   assert.equal(findCalls(deps.calls, "createAutoWorktree").length, 0);
@@ -314,7 +315,7 @@ test("enterMilestone passes project root to isolation mode guard", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(checkedBasePath, "/project");
   assert.equal(findCalls(deps.calls, "createAutoWorktree").length, 0);
@@ -331,7 +332,7 @@ test("enterMilestone does NOT update basePath on creation failure", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project"); // unchanged — error recovery
   assert.ok(
@@ -357,7 +358,7 @@ test("enterMilestone uses originalBasePath as base for worktree ops", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M002", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M002", ctx);
 
   assert.equal(createdFrom, "/project"); // uses originalBasePath, not current basePath
 });
@@ -388,7 +389,7 @@ test("enterMilestone does not create double-nested worktree when originalBasePat
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M002", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M002", ctx);
 
   // The path passed to createAutoWorktree must be the project root, NOT the
   // worktree path. If it equals wtPath the worktree would be created at
@@ -424,7 +425,7 @@ test("enterMilestone reacquires a released same-milestone lease before worktree 
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   const row = getMilestoneLease("M001");
   assert.ok(row);
@@ -446,7 +447,7 @@ test("enterMilestone in branch mode calls enterBranchModeForMilestone and rebuil
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   // Branch mode: no worktree created, basePath unchanged
   assert.equal(s.basePath, "/project");
@@ -469,7 +470,7 @@ test("enterMilestone in branch mode uses originalBasePath as base", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(calledWith, "/project");
 });
@@ -485,7 +486,7 @@ test("enterMilestone in branch mode degrades isolation on failure", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project"); // unchanged
   assert.ok(s.isolationDegraded);
@@ -501,7 +502,7 @@ test("enterMilestone branch mode is skipped when isolationDegraded", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(findCalls(deps.calls, "enterBranchModeForMilestone").length, 0);
   assert.equal(findCalls(deps.calls, "createAutoWorktree").length, 0);
@@ -1192,7 +1193,7 @@ test("GitService is rebuilt with the NEW basePath after enterMilestone", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(gitServiceBasePath, "/project/.gsd/worktrees/M001"); // new path, not old
 });
@@ -1232,7 +1233,7 @@ test("enterMilestone sets isolationDegraded when worktree creation throws (#2483
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.isolationDegraded, true);
   assert.equal(s.basePath, "/project"); // unchanged — error recovery
@@ -1245,7 +1246,7 @@ test("enterMilestone is no-op when isolationDegraded is true (#2483)", () => {
   const ctx = makeNotifyCtx();
   const resolver = new WorktreeResolver(s, deps);
 
-  resolver.enterMilestone("M001", ctx);
+  new WorktreeLifecycle(s, deps).enterMilestone("M001", ctx);
 
   assert.equal(s.basePath, "/project"); // unchanged
   assert.equal(findCalls(deps.calls, "createAutoWorktree").length, 0);

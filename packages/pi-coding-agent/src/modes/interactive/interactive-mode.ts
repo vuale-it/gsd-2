@@ -1372,7 +1372,7 @@ export class InteractiveMode {
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,
 			isIdle: () => !this.session.isStreaming,
-			abort: () => this.session.abort(),
+				abort: () => this.session.abort({ origin: "user" }),
 			hasPendingMessages: () => this.session.pendingMessageCount > 0,
 			shutdown: () => {
 				this.shutdownRequested = true;
@@ -3037,7 +3037,7 @@ export class InteractiveMode {
 		if (allQueued.length === 0) {
 			this.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.agent.abort();
+					this.agent.abort("user");
 			}
 			return 0;
 		}
@@ -3047,7 +3047,7 @@ export class InteractiveMode {
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.agent.abort();
+				this.agent.abort("user");
 		}
 		return allQueued.length;
 	}

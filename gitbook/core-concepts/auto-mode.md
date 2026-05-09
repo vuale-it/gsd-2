@@ -117,6 +117,20 @@ Every auto-mode unit declares a `ToolsPolicy` in its `UnitContextManifest`, and 
 
 Policy violations return a hard block, so unsafe writes, unsafe bash, and subagent dispatch from non-dispatch planning units are stopped at runtime rather than handled as model instructions. In `planning-dispatch` units, prompts steer the parent agent toward read-only specialists such as `scout`, `planner`, `researcher`, `reviewer`, `security`, or `tester`; implementation-tier agents still belong in `execute-task`.
 
+## Pre-Dispatch Runtime Blocks
+
+Before auto mode launches a unit, the orchestration pipeline enforces runtime invariants in this order: reconcile state, choose the next unit, compile the unit tool contract, validate the worktree or unit root, then persist the runtime transition. A failure in any pre-dispatch step returns a `blocked` result before a worker session starts.
+
+| Block Reason | What It Means | Remediation |
+|--------------|---------------|-------------|
+| State reconciliation blocker | The authoritative database snapshot is already blocked, or state derivation found existing blockers. | Inspect `/gsd status`, `STATE.md`, and the database-backed blocker message; resolve the blocker or run the appropriate GSD recovery command before retrying `/gsd auto`. |
+| `unknown-unit-type` | Dispatch selected a unit with no registered `UnitContextManifest`. | Fix the unit registration or manifest mapping. Retrying without a code/config fix will select the same invalid unit. |
+| `missing-closeout-tool` | A closeout unit such as task, slice, milestone, UAT, or gate completion has no required workflow tool available. | Restore the missing `gsd_*` workflow tool registration or update the unit manifest/tool contract so the unit can durably save its result. |
+| `root-missing` / `root-not-directory` | A source-writing unit would run from a missing or invalid unit root. | Recreate or repair the milestone worktree/root, or clear an incorrect `GSD_UNIT_ROOT`, before launching another source-writing unit. |
+| `git-metadata-missing` | A source-writing unit root exists but is not a git worktree or repository root. | Run the unit from the project root or milestone worktree with valid `.git` metadata; recreate the worktree if it was deleted or partially copied. |
+
+Recovery classification treats deterministic policy, tool-schema, stale-worker, and invalid-worktree failures as non-transient stops. Provider failures still use provider-specific transient classification and may retry automatically, while verification drift and unknown runtime failures escalate for inspection because repeating the same dispatch can preserve the drift.
+
 ## Reactive Task Execution
 
 Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from task-plan IO annotations. With default settings, it only attempts a reactive batch when at least three ready tasks are available and the graph is non-ambiguous. Non-conflicting tasks are dispatched in parallel via subagents; dependent tasks wait for their predecessors.

@@ -19,6 +19,7 @@ import type {
 } from "../auto-verification.js";
 import type { DispatchAction, DispatchContext } from "../auto-dispatch.js";
 import type { WorktreeResolver } from "../worktree-resolver.js";
+import type { WorktreeLifecycle } from "../worktree-lifecycle.js";
 import type { CmuxLogLevel } from "../../shared/cmux-events.js";
 import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
@@ -271,6 +272,9 @@ export interface LoopDeps {
 
   // WorktreeResolver
   resolver: WorktreeResolver;
+
+  // Worktree Lifecycle Module (ADR-016)
+  lifecycle: WorktreeLifecycle;
 
   // Post-unit processing
   postUnitPreVerification: (

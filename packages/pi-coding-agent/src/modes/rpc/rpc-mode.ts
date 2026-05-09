@@ -533,7 +533,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			}
 
 			case "abort": {
-				await session.abort();
+					await session.abort({ origin: "user" });
 				return success(id, "abort");
 			}
 

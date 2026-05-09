@@ -73,7 +73,12 @@ test("milestone transition archives completed units and rebuilds state", async (
         postflightPopStash: () => ({ ok: true, needsManualRecovery: false }),
         resolver: {
           mergeAndExit: () => calls.push("merge"),
-          enterMilestone: (mid: string) => calls.push(`enter:${mid}`),
+        },
+        lifecycle: {
+          enterMilestone: (mid: string) => {
+            calls.push(`enter:${mid}`);
+            return { ok: true, mode: "worktree", path: `/wt/${mid}` };
+          },
         },
         sendDesktopNotification: () => {},
         logCmuxEvent: () => {},

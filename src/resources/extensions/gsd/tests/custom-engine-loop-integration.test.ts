@@ -232,10 +232,21 @@ function makeMockDeps(overrides?: Partial<LoopDeps>): LoopDeps & { callLog: stri
       get workPath() { return "/tmp/project"; },
       get projectRoot() { return "/tmp/project"; },
       get lockPath() { return "/tmp/project"; },
-      enterMilestone: () => {},
-      exitMilestone: () => {},
-      mergeAndExit: () => {},
-      mergeAndEnterNext: () => {},
+      enterMilestone: () => {
+        assert.fail("custom-engine loop should call deps.lifecycle.enterMilestone, not resolver.enterMilestone");
+      },
+      exitMilestone: () => {
+        assert.fail("custom-engine loop should not call resolver.exitMilestone");
+      },
+      mergeAndExit: () => {
+        assert.fail("custom-engine loop should not call resolver.mergeAndExit");
+      },
+      mergeAndEnterNext: () => {
+        assert.fail("custom-engine loop should not call resolver.mergeAndEnterNext");
+      },
+    } as any,
+    lifecycle: {
+      enterMilestone: () => ({ ok: true, mode: "worktree", path: "/tmp/project" }),
     } as any,
     postUnitPreVerification: async () => "continue" as const,
     runPostUnitVerification: async () => "continue" as const,

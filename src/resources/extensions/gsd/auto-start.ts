@@ -96,6 +96,7 @@ import {
   resolveDynamicRoutingConfig,
 } from "./preferences-models.js";
 import type { WorktreeResolver } from "./worktree-resolver.js";
+import type { WorktreeLifecycle } from "./worktree-lifecycle.js";
 import { getSessionModelOverride } from "./session-model-override.js";
 
 export interface BootstrapDeps {
@@ -103,6 +104,7 @@ export interface BootstrapDeps {
   registerSigtermHandler: (basePath: string) => void;
   lockBase: () => string;
   buildResolver: () => WorktreeResolver;
+  buildLifecycle: () => WorktreeLifecycle;
 }
 
 export function resolveIsolationNoneBranchCheckout(
@@ -531,6 +533,7 @@ export async function bootstrapAutoSession(
     registerSigtermHandler,
     lockBase,
     buildResolver,
+    buildLifecycle,
   } = deps;
 
   const dirCheck = validateDirectory(base);
@@ -1115,9 +1118,28 @@ export async function bootstrapAutoSession(
       !detectWorktreeName(base) &&
       !isUnderGsdWorktrees(base)
     ) {
-      buildResolver().enterMilestone(s.currentMilestoneId, {
+      const enterResult = buildLifecycle().enterMilestone(s.currentMilestoneId, {
         notify: ctx.ui.notify.bind(ctx.ui),
       });
+      if (!enterResult.ok) {
+        if (enterResult.reason === "lease-conflict") {
+          ctx.ui.notify(
+            `Cannot enter milestone ${s.currentMilestoneId}: lease is held by another worker.`,
+            "error",
+          );
+        } else if (enterResult.reason === "creation-failed") {
+          ctx.ui.notify(
+            `Cannot enter milestone ${s.currentMilestoneId}: worktree/branch creation failed. Isolation is degraded.`,
+            "error",
+          );
+        } else if (enterResult.reason === "invalid-milestone-id") {
+          ctx.ui.notify(
+            `Cannot enter milestone ${s.currentMilestoneId}: milestone id is invalid.`,
+            "error",
+          );
+        }
+        return releaseLockAndReturn();
+      }
       if (s.basePath !== base) {
         // Successfully entered worktree — re-register SIGTERM handler at original base
         registerSigtermHandler(s.originalBasePath);

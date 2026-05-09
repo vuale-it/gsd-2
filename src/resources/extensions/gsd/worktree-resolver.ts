@@ -21,11 +21,11 @@ import type { AutoSession } from "./auto/session.js";
 import { debugLog } from "./debug-logger.js";
 import { MergeConflictError } from "./git-service.js";
 import { emitJournalEvent } from "./journal.js";
-import { emitWorktreeCreated, emitWorktreeMerged } from "./worktree-telemetry.js";
+import { emitWorktreeMerged } from "./worktree-telemetry.js";
 import { getCollapseCadence, getMilestoneResquash, resquashMilestoneOnMain } from "./slice-cadence.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "./worktree-root.js";
-import { claimMilestoneLease, refreshMilestoneLease, releaseMilestoneLease } from "./db/milestone-leases.js";
+import { _enterMilestoneCore, type EnterResult } from "./worktree-lifecycle.js";
 
 // ─── Path Comparison Helper ────────────────────────────────────────────────
 /**
@@ -192,250 +192,9 @@ export class WorktreeResolver {
   }
 
   // ── Enter Milestone ────────────────────────────────────────────────────
-
-  /**
-   * Enter or create a worktree for the given milestone.
-   *
-   * Only acts if `shouldUseWorktreeIsolation()` returns true.
-   * Delegates to `enterAutoWorktree` (existing) or `createAutoWorktree` (new).
-   * Those functions call `process.chdir()` internally — we do NOT double-chdir.
-   *
-   * Updates `s.basePath` and rebuilds GitService on success.
-   * On failure: notifies a warning and does NOT update `s.basePath`.
-   */
-  enterMilestone(milestoneId: string, ctx: NotifyCtx): void {
-    this.validateMilestoneId(milestoneId);
-
-    // If worktree creation failed earlier this session, skip all future attempts
-    if (this.s.isolationDegraded) {
-      debugLog("WorktreeResolver", {
-        action: "enterMilestone",
-        milestoneId,
-        skipped: true,
-        reason: "isolation-degraded",
-      });
-      return;
-    }
-
-    // Phase B: claim a milestone lease before any worktree mutation. Two
-    // workers cannot enter the same milestone concurrently. Best-effort:
-    // skip if no worker registered (single-worker fallback) or DB
-    // unavailable; reuse existing lease if we already hold it on this
-    // milestone (re-entry within the same session).
-    if (this.s.workerId) {
-      if (this.s.currentMilestoneId === milestoneId && this.s.milestoneLeaseToken !== null) {
-        const refreshed = refreshMilestoneLease(
-          this.s.workerId,
-          milestoneId,
-          this.s.milestoneLeaseToken,
-        );
-        if (refreshed) {
-          debugLog("WorktreeResolver", {
-            action: "enterMilestone",
-            milestoneId,
-            leaseRefreshed: true,
-            fencingToken: this.s.milestoneLeaseToken,
-          });
-        } else {
-          debugLog("WorktreeResolver", {
-            action: "enterMilestone",
-            milestoneId,
-            staleLeaseToken: this.s.milestoneLeaseToken,
-          });
-          this.s.milestoneLeaseToken = null;
-        }
-      }
-
-      // If we held a different milestone, release it first so other
-      // workers don't have to wait for TTL.
-      if (this.s.currentMilestoneId && this.s.currentMilestoneId !== milestoneId && this.s.milestoneLeaseToken !== null) {
-        try {
-          releaseMilestoneLease(this.s.workerId, this.s.currentMilestoneId, this.s.milestoneLeaseToken);
-        } catch (err) {
-          debugLog("WorktreeResolver", {
-            action: "enterMilestone",
-            milestoneId,
-            releasePriorLeaseError: err instanceof Error ? err.message : String(err),
-          });
-        }
-        this.s.milestoneLeaseToken = null;
-      }
-
-      if (this.s.milestoneLeaseToken === null) {
-        try {
-          const claim = claimMilestoneLease(this.s.workerId, milestoneId);
-          if (claim.ok) {
-            this.s.milestoneLeaseToken = claim.token;
-            debugLog("WorktreeResolver", {
-              action: "enterMilestone",
-              milestoneId,
-              leaseAcquired: true,
-              fencingToken: claim.token,
-              expiresAt: claim.expiresAt,
-            });
-          } else {
-            // Lease held by another worker — fail loud so the user can
-            // see the conflict instead of silently double-running.
-            const msg = `Milestone ${milestoneId} is held by worker ${claim.byWorker} until ${claim.expiresAt}.`;
-            debugLog("WorktreeResolver", {
-              action: "enterMilestone",
-              milestoneId,
-              leaseHeldByOther: claim.byWorker,
-              expiresAt: claim.expiresAt,
-            });
-            ctx.notify(`${msg} Another auto-mode worker is active. Stop it before entering ${milestoneId}.`, "error");
-            return;
-          }
-        } catch (err) {
-          // DB unavailable or other error — log and fall through to the
-          // pre-Phase-B single-worker behavior so a fresh project before
-          // DB init still works.
-          debugLog("WorktreeResolver", {
-            action: "enterMilestone",
-            milestoneId,
-            leaseError: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    }
-
-    // Resolve the project root for worktree operations via shared helper.
-    // Handles the case where originalBasePath is falsy and basePath is itself
-    // a worktree path — prevents double-nested worktree paths (#3729).
-    const basePath = resolveProjectRoot(this.s.originalBasePath, this.s.basePath);
-    const mode = this.deps.getIsolationMode(basePath);
-
-    if (mode === "none") {
-      debugLog("WorktreeResolver", {
-        action: "enterMilestone",
-        milestoneId,
-        skipped: true,
-        reason: "isolation-disabled",
-      });
-      emitJournalEvent(this.s.originalBasePath || this.s.basePath, {
-        ts: new Date().toISOString(),
-        flowId: randomUUID(),
-        seq: 0,
-        eventType: "worktree-skip",
-        data: { milestoneId, reason: "isolation-disabled" },
-      });
-      return;
-    }
-
-    debugLog("WorktreeResolver", {
-      action: "enterMilestone",
-      milestoneId,
-      mode,
-      basePath,
-    });
-
-    // ── Branch mode: create/checkout milestone branch, stay in project root ──
-    if (mode === "branch") {
-      try {
-        this.deps.enterBranchModeForMilestone(basePath, milestoneId);
-        // basePath does not change — no worktree, no chdir.
-        // Rebuild GitService so the new HEAD is reflected, then flush any
-        // path-keyed caches that may have been populated before the checkout.
-        this.rebuildGitService();
-        this.deps.invalidateAllCaches();
-        debugLog("WorktreeResolver", {
-          action: "enterMilestone",
-          milestoneId,
-          mode: "branch",
-          result: "success",
-        });
-        emitJournalEvent(basePath, {
-          ts: new Date().toISOString(),
-          flowId: randomUUID(),
-          seq: 0,
-          eventType: "worktree-skip",
-          data: { milestoneId, reason: "branch-mode-no-worktree" },
-        });
-        ctx.notify(`Switched to branch milestone/${milestoneId}.`, "info");
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        debugLog("WorktreeResolver", {
-          action: "enterMilestone",
-          milestoneId,
-          mode: "branch",
-          result: "error",
-          error: msg,
-        });
-        ctx.notify(
-          `Branch isolation setup for ${milestoneId} failed: ${msg}. Continuing on current branch.`,
-          "warning",
-        );
-        this.s.isolationDegraded = true;
-      }
-      return;
-    }
-
-    // ── Worktree mode ─────────────────────────────────────────────────────────
-    try {
-      const existingPath = this.deps.getAutoWorktreePath(basePath, milestoneId);
-      let wtPath: string;
-
-      if (existingPath) {
-        wtPath = this.deps.enterAutoWorktree(basePath, milestoneId);
-      } else {
-        wtPath = this.deps.createAutoWorktree(basePath, milestoneId);
-      }
-
-      this.s.basePath = wtPath;
-      this.rebuildGitService();
-
-      debugLog("WorktreeResolver", {
-        action: "enterMilestone",
-        milestoneId,
-        result: "success",
-        wtPath,
-      });
-      emitJournalEvent(this.s.originalBasePath || this.s.basePath, {
-        ts: new Date().toISOString(),
-        flowId: randomUUID(),
-        seq: 0,
-        eventType: "worktree-enter",
-        data: { milestoneId, wtPath, created: !existingPath },
-      });
-      // #4764 — record creation/enter as a lifecycle event so the telemetry
-      // aggregator can pair it with the eventual worktree-merged event.
-      try {
-        emitWorktreeCreated(this.s.originalBasePath || this.s.basePath, milestoneId, {
-          reason: existingPath ? "enter-milestone" : "create-milestone",
-        });
-      } catch (telemetryErr) {
-        debugLog("WorktreeResolver", {
-          action: "enterMilestone",
-          phase: "telemetry-emit",
-          error: telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr),
-        });
-      }
-      ctx.notify(`Entered worktree for ${milestoneId} at ${wtPath}`, "info");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      debugLog("WorktreeResolver", {
-        action: "enterMilestone",
-        milestoneId,
-        result: "error",
-        error: msg,
-      });
-      emitJournalEvent(this.s.originalBasePath || this.s.basePath, {
-        ts: new Date().toISOString(),
-        flowId: randomUUID(),
-        seq: 0,
-        eventType: "worktree-create-failed",
-        data: { milestoneId, error: msg, fallback: "project-root" },
-      });
-      ctx.notify(
-        `Auto-worktree creation for ${milestoneId} failed: ${msg}. Continuing in project root.`,
-        "warning",
-      );
-      // Degrade isolation for the rest of this session so mergeAndExit
-      // doesn't try to merge a nonexistent worktree branch (#2483)
-      this.s.isolationDegraded = true;
-      // Do NOT update s.basePath — stay in project root
-    }
-  }
+  // The enterMilestone verb moved to the Worktree Lifecycle Module
+  // (ADR-016 / issue #5585). External callers use WorktreeLifecycle.enterMilestone.
+  // The internal mergeAndEnterNext recursion calls _enterMilestoneCore directly.
 
   // ── Exit Milestone ─────────────────────────────────────────────────────
 
@@ -986,7 +745,7 @@ export class WorktreeResolver {
     currentMilestoneId: string,
     nextMilestoneId: string,
     ctx: NotifyCtx,
-  ): void {
+  ): EnterResult {
     debugLog("WorktreeResolver", {
       action: "mergeAndEnterNext",
       currentMilestoneId,
@@ -1003,6 +762,6 @@ export class WorktreeResolver {
       // the current one unmerged.
       if (this.s.basePath !== this.projectRoot) throw err;
     }
-    this.enterMilestone(nextMilestoneId, ctx);
+    return _enterMilestoneCore(this.s, this.deps, nextMilestoneId, ctx);
   }
 }

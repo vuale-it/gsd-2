@@ -1,17 +1,50 @@
+// Project/App: GSD-2
+// File Purpose: Auto Orchestration module contract and ADR-015 invariant sequence tests.
+
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createAutoOrchestrator } from "../auto/orchestrator.js";
 import type { AutoOrchestratorDeps } from "../auto/contracts.js";
+import type { GSDState } from "../types.js";
+
+function makeState(): GSDState {
+  return {
+    activeMilestone: { id: "M001", title: "Milestone" },
+    activeSlice: null,
+    activeTask: null,
+    phase: "executing",
+    recentDecisions: [],
+    blockers: [],
+    nextAction: "Execute task",
+    registry: [],
+    requirements: { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 },
+    progress: { milestones: { done: 0, total: 1 } },
+  };
+}
 
 function makeDeps(overrides: Partial<AutoOrchestratorDeps> = {}): { deps: AutoOrchestratorDeps; calls: string[] } {
   const calls: string[] = [];
+  const stateSnapshot = makeState();
 
   const deps: AutoOrchestratorDeps = {
+    stateReconciliation: {
+      async reconcileBeforeDispatch() {
+        calls.push("state.reconcile");
+        return { ok: true, stateSnapshot };
+      },
+    },
     dispatch: {
-      async decideNextUnit() {
+      async decideNextUnit(input) {
         calls.push("dispatch.decide");
+        assert.equal(input.stateSnapshot, stateSnapshot);
         return { unitType: "execute-task", unitId: "T01", reason: "ready", preconditions: [] };
+      },
+    },
+    toolContract: {
+      async compileUnitToolContract() {
+        calls.push("tool.compile");
+        return { ok: true };
       },
     },
     recovery: {
@@ -21,7 +54,10 @@ function makeDeps(overrides: Partial<AutoOrchestratorDeps> = {}): { deps: AutoOr
       },
     },
     worktree: {
-      async prepareForUnit() { calls.push("worktree.prepare"); },
+      async prepareForUnit() {
+        calls.push("worktree.prepare");
+        return { ok: true };
+      },
       async syncAfterUnit() { calls.push("worktree.sync"); },
       async cleanupOnStop() { calls.push("worktree.cleanup"); },
     },
@@ -71,6 +107,87 @@ test("advance() returns blocked when health gate denies", async () => {
 
   assert.equal(result.kind, "blocked");
   assert.equal(result.reason, "doctor-block");
+});
+
+test("advance() follows the ADR-015 invariant sequence before journaling advance", async () => {
+  const { deps, calls } = makeDeps();
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const result = await orchestrator.advance();
+
+  assert.equal(result.kind, "advanced");
+  assert.deepEqual(calls, [
+    "runtime.lock",
+    "health.pre",
+    "state.reconcile",
+    "dispatch.decide",
+    "tool.compile",
+    "worktree.prepare",
+    "journal:advance",
+    "worktree.sync",
+    "health.post",
+  ]);
+});
+
+test("advance() blocks before dispatch when State Reconciliation blocks", async () => {
+  const { deps, calls } = makeDeps({
+    stateReconciliation: {
+      async reconcileBeforeDispatch() {
+        calls.push("state.reconcile");
+        return { ok: false, reason: "state drift blocked", stateSnapshot: makeState() };
+      },
+    },
+  });
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const result = await orchestrator.advance();
+
+  assert.equal(result.kind, "blocked");
+  assert.equal(result.reason, "state drift blocked");
+  assert.ok(!calls.includes("dispatch.decide"));
+  assert.ok(calls.includes("journal:advance-blocked"));
+});
+
+test("advance() blocks before Runtime persistence when Tool Contract fails", async () => {
+  const { deps, calls } = makeDeps({
+    toolContract: {
+      async compileUnitToolContract() {
+        calls.push("tool.compile");
+        return { ok: false, reason: "unknown Unit" };
+      },
+    },
+  });
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const result = await orchestrator.advance();
+
+  assert.equal(result.kind, "blocked");
+  assert.equal(result.reason, "unknown Unit");
+  assert.ok(!calls.includes("worktree.prepare"));
+  assert.ok(!calls.includes("journal:advance"));
+  assert.ok(calls.includes("journal:advance-blocked"));
+});
+
+test("advance() blocks before Runtime persistence when Worktree Safety fails", async () => {
+  const { deps, calls } = makeDeps({
+    worktree: {
+      async prepareForUnit() {
+        calls.push("worktree.prepare");
+        return { ok: false, reason: "worktree invalid" };
+      },
+      async syncAfterUnit() { calls.push("worktree.sync"); },
+      async cleanupOnStop() { calls.push("worktree.cleanup"); },
+    },
+  });
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const result = await orchestrator.advance();
+
+  assert.equal(result.kind, "blocked");
+  assert.equal(result.reason, "worktree invalid");
+  assert.ok(!calls.includes("journal:advance"));
+  assert.ok(!calls.includes("worktree.sync"));
+  assert.ok(calls.includes("journal:advance-blocked"));
 });
 
 test("advance() stops when dispatch has no next unit", async () => {

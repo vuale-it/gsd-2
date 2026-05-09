@@ -9,6 +9,8 @@
 - **Recovery decision**: retry/escalate/abort choice after runtime failure.
 - **Runtime persistence**: lock state, transition journal, and any persisted execution state required for safe resume.
 - **DB snapshot persistence**: crash-safe persistence of a full SQLite image exported from `sql.js`, written as a same-directory temporary file and atomically renamed over the live database path.
+- **Worktree Lifecycle**: creation, entry, teardown, and merge of an auto-mode worktree, including `s.basePath` mutation, `process.chdir` discipline, and milestone lease coordination.
+- **Worktree State Projection**: directional flow of state files between the project root and the auto-worktree, where one side is authoritative per file class (e.g., project root is authoritative for `completed-units.json` after crash recovery; worktree is authoritative for in-flight artifacts).
 
 ## Architecture terms adopted for this area
 
@@ -22,6 +24,8 @@
 - **DB snapshot persistence module**: the deep module that owns `sql.js` snapshot write semantics, including temp-file naming, fsync, cleanup, and rename ordering.
 - **State Reconciliation module**: module that reconciles DB-authoritative runtime state with durable disk projections before a Dispatch decision.
 - **Worktree Safety module**: module that validates project root, worktree registration, lease ownership, and git health before a source-writing Unit runs.
+- **Worktree Lifecycle module**: module that owns worktree create/enter/teardown/merge verbs, `s.basePath` mutation, and `process.chdir` discipline. Sole owner of these mutations across single-loop and parallel callers.
+- **Worktree State Projection module**: module that owns the direction-and-rules of state file flow between project root and auto-worktree. Encodes the bug-hardened invariants (additive milestone copy, ASSESSMENT verdict overwrite, completed-units forward-sync, WAL/SHM cleanup) that `syncProjectRootToWorktree` and `syncStateToProjectRoot` carry today.
 - **Recovery Classification module**: module that maps provider, tool, policy, git, worktree, and runtime failures to a Recovery decision.
 - **Tool Contract module**: module that keeps Unit prompts, tool schemas, tool policy, and pre-dispatch validation aligned.
 

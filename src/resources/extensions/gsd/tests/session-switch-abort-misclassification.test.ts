@@ -6,8 +6,10 @@ import assert from "node:assert/strict";
 
 import {
   _handleSessionSwitchAgentEnd,
+  isBareClaudeCodeStreamAbortPlaceholder,
   isClaudeCodeSessionSwitchAbortMessage,
 } from "../bootstrap/agent-end-recovery.js";
+import { shouldIgnoreAgentEndForActiveUnit } from "../auto/unit-runner-events.js";
 import type { ErrorContext } from "../auto/types.js";
 
 test("user-abort message during session-switch is dropped (not propagated as cancellation)", () => {
@@ -75,6 +77,60 @@ test("Claude Code stream-aborted placeholder during session-switch is dropped", 
   );
 
   assert.equal(cancelledWith, null);
+});
+
+test("late bare Claude Code stream-aborted placeholder is classified as internal", () => {
+  // Reproduces the M003/S04 failure shape from testingapp1: the previous unit
+  // completed, the next unit was dispatched, then Claude Code emitted a
+  // zero-token stream-aborted placeholder. That marker belongs to session
+  // transition cleanup, not the active unit.
+  assert.equal(
+    isBareClaudeCodeStreamAbortPlaceholder({
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Claude Code stream aborted by caller" }],
+    }),
+    true,
+  );
+
+  assert.equal(
+    isBareClaudeCodeStreamAbortPlaceholder({
+      stopReason: "aborted",
+      errorMessage: "stream torn down mid-flight",
+      content: [{ type: "text", text: "Claude Code stream aborted by caller" }],
+    }),
+    false,
+    "diagnostic aborts must stay on the normal cancelled path",
+  );
+
+  assert.equal(
+    isBareClaudeCodeStreamAbortPlaceholder({
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Request aborted by user" }],
+    }),
+    false,
+    "user abort markers outside the session-switch path must not be swallowed",
+  );
+});
+
+test("typed session-transition abort events are classified as internal", () => {
+  assert.equal(
+    shouldIgnoreAgentEndForActiveUnit({
+      abortOrigin: "session-transition",
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldIgnoreAgentEndForActiveUnit({
+      abortOrigin: "user",
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldIgnoreAgentEndForActiveUnit({}),
+    false,
+  );
 });
 
 test("Claude Code session-switch abort detection is narrow", () => {

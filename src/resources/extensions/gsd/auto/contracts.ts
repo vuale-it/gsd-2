@@ -1,3 +1,6 @@
+// Project/App: GSD-2
+// File Purpose: Auto Orchestration module interfaces and ADR-015 invariant adapter contracts.
+
 import type { GSDState } from "../types.js";
 
 export interface AutoSessionContext {
@@ -30,7 +33,7 @@ export interface AutoOrchestrationModule {
 }
 
 export interface DispatchAdapter {
-  decideNextUnit(): Promise<{
+  decideNextUnit(input: { stateSnapshot: GSDState }): Promise<{
     unitType: string;
     unitId: string;
     reason: string;
@@ -49,8 +52,20 @@ export interface RecoveryAdapter {
   }>;
 }
 
+export type InvariantAdapterResult =
+  | { ok: true; reason?: string; stateSnapshot?: GSDState }
+  | { ok: false; reason: string; stateSnapshot?: GSDState };
+
+export interface StateReconciliationAdapter {
+  reconcileBeforeDispatch(): Promise<InvariantAdapterResult & { stateSnapshot?: GSDState }>;
+}
+
+export interface ToolContractAdapter {
+  compileUnitToolContract(unitType: string, unitId: string): Promise<InvariantAdapterResult>;
+}
+
 export interface WorktreeAdapter {
-  prepareForUnit(unitType: string, unitId: string): Promise<void>;
+  prepareForUnit(unitType: string, unitId: string): Promise<InvariantAdapterResult>;
   syncAfterUnit(unitType: string, unitId: string): Promise<void>;
   cleanupOnStop(reason: string): Promise<void>;
 }
@@ -78,7 +93,9 @@ export interface NotificationAdapter {
 }
 
 export interface AutoOrchestratorDeps {
+  stateReconciliation: StateReconciliationAdapter;
   dispatch: DispatchAdapter;
+  toolContract: ToolContractAdapter;
   recovery: RecoveryAdapter;
   worktree: WorktreeAdapter;
   health: HealthAdapter;

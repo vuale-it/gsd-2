@@ -742,10 +742,15 @@ function makeMockDeps(
       get lockPath() {
         return "/tmp/project";
       },
-      enterMilestone: () => {},
+      enterMilestone: () => {
+        assert.fail("auto-loop should call deps.lifecycle.enterMilestone, not resolver.enterMilestone");
+      },
       exitMilestone: () => {},
       mergeAndExit: () => {},
       mergeAndEnterNext: () => {},
+    } as any,
+    lifecycle: {
+      enterMilestone: () => ({ ok: true, mode: "worktree", path: "/tmp/project" }),
     } as any,
     postUnitPreVerification: async () => {
       callLog.push("postUnitPreVerification");

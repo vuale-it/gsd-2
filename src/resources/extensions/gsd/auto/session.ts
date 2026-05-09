@@ -109,7 +109,7 @@ export class AutoSession {
   workerId: string | null = null;
   /**
    * Active milestone lease fencing token, set by claimMilestoneLease() inside
-   * worktree-resolver.enterMilestone(). Threaded into recordDispatchClaim()
+   * worktree-lifecycle._enterMilestoneCore(). Threaded into recordDispatchClaim()
    * as milestone_lease_token so out-of-band dispatches by a stale worker
    * are detectable.
    */
