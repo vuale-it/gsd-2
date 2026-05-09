@@ -1,3 +1,4 @@
+// GSD2 - Agent session lifecycle and workspace runtime coordination
 /**
  * AgentSession - Core abstraction for agent lifecycle and session management.
  *
@@ -167,6 +168,8 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
+	/** Mutable ref used by providers to access the current workspace root. */
+	workspaceRootRef?: { current: string };
 	/** Optional: check if the claude-code CLI provider is ready (installed + authed).
 	 * Passed through to RetryHandler for third-party block recovery (#3772). */
 	isClaudeCodeReady?: () => boolean;
@@ -284,6 +287,7 @@ export class AgentSession {
 	private _baseToolRegistry: Map<string, AgentTool> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
+	private _workspaceRootRef?: { current: string };
 	private _initialActiveToolNames?: string[];
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -323,6 +327,10 @@ export class AgentSession {
 			this._modelRegistry,
 		);
 		this._extensionRunnerRef = config.extensionRunnerRef;
+		this._workspaceRootRef = config.workspaceRootRef;
+		if (this._workspaceRootRef) {
+			this._workspaceRootRef.current = this._cwd;
+		}
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._baseToolsOverride = config.baseToolsOverride;
 
@@ -1711,6 +1719,9 @@ export class AgentSession {
 		// historical default.
 		const previousCwd = this._cwd;
 		this._cwd = options?.workspaceRoot ?? process.cwd();
+		if (this._workspaceRootRef) {
+			this._workspaceRootRef.current = this._cwd;
+		}
 		this.sessionManager.newSession({ parentSession: options?.parentSession });
 		this.agent.sessionId = this.sessionManager.getSessionId();
 		this._steeringMessages = [];

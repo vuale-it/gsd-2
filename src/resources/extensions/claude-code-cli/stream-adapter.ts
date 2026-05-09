@@ -1,3 +1,4 @@
+// GSD2 - Claude Code CLI provider stream adapter
 /**
  * Stream adapter: bridges the Claude Agent SDK into GSD's streamSimple contract.
  *
@@ -59,6 +60,11 @@ type ToolCallWithExternalResult = ToolCall & {
 /** `SimpleStreamOptions` extended with an optional extension UI context for elicitation dialogs. */
 interface ClaudeCodeStreamOptions extends SimpleStreamOptions {
 	extensionUIContext?: ExtensionUIContext;
+}
+
+/** Resolve the workspace root for local Claude Code process execution. */
+export function resolveClaudeCodeCwd(options?: SimpleStreamOptions): string {
+	return options?.cwd && options.cwd.trim().length > 0 ? options.cwd : process.cwd();
 }
 
 /** A single selectable option within an SDK elicitation schema field. */
@@ -1307,8 +1313,9 @@ export function buildSdkOptions(
 	overrides?: { permissionMode?: "bypassPermissions" | "acceptEdits" | "default" | "plan" },
 	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel } = {},
 ): Record<string, unknown> {
-	const { reasoning, ...sdkExtraOptions } = extraOptions;
-	const mcpServers = buildWorkflowMcpServers();
+	const { reasoning, cwd, ...sdkExtraOptions } = extraOptions;
+	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
+	const mcpServers = buildWorkflowMcpServers(sdkCwd);
 	const permissionMode = overrides?.permissionMode ?? "bypassPermissions";
 	// Globally unblock the tools GSD expects Claude Code to run. When the
 	// workflow MCP server is available, prefer its `ask_user_questions` tool over
@@ -1349,7 +1356,7 @@ export function buildSdkOptions(
 		model: modelId,
 		includePartialMessages: true,
 		persistSession: true,
-		cwd: process.cwd(),
+		cwd: sdkCwd,
 		permissionMode,
 		allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
 		settingSources: ["project"],
@@ -1661,6 +1668,7 @@ async function pumpSdkMessages(
 		const queryPrompt = buildSdkQueryPrompt(context, prompt);
 		const permissionMode = await resolveClaudePermissionMode();
 		const uiContext = (options as ClaudeCodeStreamOptions | undefined)?.extensionUIContext;
+		const cwd = resolveClaudeCodeCwd(options);
 		const canUseToolHandler = createClaudeCodeCanUseToolHandler(uiContext);
 		// When no UI is available (headless / auto-mode), auto-approve all
 		// tool requests. This replaces the old bypassPermissions workaround.
@@ -1672,6 +1680,7 @@ async function pumpSdkMessages(
 			prompt,
 			{ permissionMode },
 			{
+				cwd,
 				reasoning: options?.reasoning,
 				canUseTool: canUseToolFallback,
 				...(uiContext

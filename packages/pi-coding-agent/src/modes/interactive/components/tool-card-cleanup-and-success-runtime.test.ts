@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Runtime tests for TUI tool cards, success notifications, and blocking errors.
 // GSD2 TUI Tests - Runtime coverage for tool-card cleanup and success notification rendering.
 // Runtime regression tests for the post-compaction tool-card cleanup and the
 // green-bordered success-notification rendering. Replaces the source-grep
@@ -18,7 +20,7 @@ import { Container, Text } from "@gsd/pi-tui";
 import stripAnsi from "strip-ansi";
 
 import { initTheme, theme } from "../theme/theme.js";
-import { renderExtensionNotifyInChat, shouldRenderExtensionNotifyInChat } from "../interactive-mode.js";
+import { renderBlockingErrorBanner, renderExtensionNotifyInChat, shouldRenderExtensionNotifyInChat } from "../interactive-mode.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { ToolExecutionComponent } from "./tool-execution.js";
 
@@ -55,6 +57,34 @@ describe("Extension warning notifications", () => {
 				`${type} notification text should appear in chat output`,
 			);
 		}
+	});
+});
+
+describe("Blocking error banner", () => {
+	it("keeps full error notifications renderable outside chat history", () => {
+		const banner = new Container();
+		const message = [
+			"Pre-execution checks failed: 3 blocking issues found",
+			"  - [file] lib/types.ts: Task T01 references 'lib/types.ts'",
+			"See .gsd/milestones/M001/slices/S02/S02-PRE-EXEC-VERIFY.json for full details.",
+		].join("\n");
+
+		renderBlockingErrorBanner(banner, message);
+
+		const rendered = banner.render(140).map(stripAnsi).join("\n");
+		assert.match(rendered, /Error: Pre-execution checks failed: 3 blocking issues found/);
+		assert.match(rendered, /Task T01 references 'lib\/types\.ts'/);
+		assert.match(rendered, /S02-PRE-EXEC-VERIFY\.json/);
+	});
+
+	it("clears the sticky banner when the blocking error is cleared", () => {
+		const banner = new Container();
+
+		renderBlockingErrorBanner(banner, "Provider failed");
+		assert.match(banner.render(80).map(stripAnsi).join("\n"), /Provider failed/);
+
+		renderBlockingErrorBanner(banner, undefined);
+		assert.equal(banner.render(80).map(stripAnsi).join("\n"), "");
 	});
 });
 

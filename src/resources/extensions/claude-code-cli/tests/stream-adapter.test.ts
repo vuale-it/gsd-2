@@ -1,3 +1,4 @@
+// GSD2 - Claude Code stream adapter regression tests
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -15,6 +16,7 @@ import {
 	buildPromptFromContext,
 	buildSdkQueryPrompt,
 	buildSdkOptions,
+	resolveClaudeCodeCwd,
 	createClaudeCodeCanUseToolHandler,
 	buildBashPermissionPattern,
 	buildBashPermissionPatternOptions,
@@ -669,6 +671,45 @@ describe("stream-adapter — session persistence (#2859)", () => {
 	test("buildSdkOptions sets model and prompt correctly", () => {
 		const options = buildSdkOptions("claude-sonnet-4-20250514", "hello world");
 		assert.equal(options.model, "claude-sonnet-4-20250514");
+	});
+
+	test("buildSdkOptions prefers explicit cwd over process cwd for local SDK execution", () => {
+		const explicitCwd = "/tmp/gsd-session-root";
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "hello world", undefined, { cwd: explicitCwd });
+		assert.equal(options.cwd, explicitCwd);
+	});
+
+	test("buildSdkOptions uses explicit cwd when auto-detecting workflow MCP launch config", () => {
+		const explicitCwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-cwd-")));
+		const restore = setWorkflowMcpEnv({});
+		try {
+			delete process.env.GSD_WORKFLOW_MCP_COMMAND;
+			delete process.env.GSD_WORKFLOW_MCP_NAME;
+			delete process.env.GSD_WORKFLOW_MCP_ARGS;
+			delete process.env.GSD_WORKFLOW_MCP_ENV;
+			delete process.env.GSD_WORKFLOW_MCP_CWD;
+
+			const distDir = join(explicitCwd, "packages", "mcp-server", "dist");
+			mkdirSync(distDir, { recursive: true });
+			writeFileSync(join(distDir, "cli.js"), "#!/usr/bin/env node\n");
+
+			const options = buildSdkOptions("claude-sonnet-4-20250514", "hello world", undefined, { cwd: explicitCwd });
+			const mcpServers = options.mcpServers as Record<string, any>;
+			assert.equal(mcpServers["gsd-workflow"].cwd, explicitCwd);
+			assert.equal(mcpServers["gsd-workflow"].env.GSD_WORKFLOW_PROJECT_ROOT, explicitCwd);
+		} finally {
+			restore();
+			rmSync(explicitCwd, { recursive: true, force: true });
+		}
+	});
+
+	test("resolveClaudeCodeCwd falls back to process cwd when no stream cwd is provided", () => {
+		assert.equal(resolveClaudeCodeCwd(), process.cwd());
+		assert.equal(resolveClaudeCodeCwd({ cwd: "   " }), process.cwd());
+	});
+
+	test("resolveClaudeCodeCwd returns stream cwd when provided", () => {
+		assert.equal(resolveClaudeCodeCwd({ cwd: "/tmp/current-session" }), "/tmp/current-session");
 	});
 
 	test("buildSdkOptions enables betas for sonnet models", () => {

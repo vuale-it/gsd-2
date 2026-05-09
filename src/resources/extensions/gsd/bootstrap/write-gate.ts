@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+// GSD2 - Write gate runtime persistence and policy guards.
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { minimatch } from "minimatch";
@@ -147,6 +148,22 @@ function writeGateSnapshotPath(basePath: string): string {
   return join(basePath, ".gsd", "runtime", "write-gate-state.json");
 }
 
+function ensureWriteGateSnapshotDirectory(basePath: string): void {
+  const gsdPath = join(basePath, ".gsd");
+  if (!existsSync(gsdPath)) {
+    try {
+      const stat = lstatSync(gsdPath);
+      if (stat.isSymbolicLink()) {
+        const target = readlinkSync(gsdPath);
+        mkdirSync(isAbsolute(target) ? target : resolve(basePath, target), { recursive: true });
+      }
+    } catch {
+      // If .gsd truly does not exist, the runtime mkdir below will create it.
+    }
+  }
+  mkdirSync(join(gsdPath, "runtime"), { recursive: true });
+}
+
 function currentWriteGateSnapshot(basePath: string = process.cwd()): WriteGateSnapshot {
   const state = getWriteGateState(basePath);
   return {
@@ -160,7 +177,7 @@ function currentWriteGateSnapshot(basePath: string = process.cwd()): WriteGateSn
 function persistWriteGateSnapshot(basePath: string): void {
   if (!shouldPersistWriteGateSnapshot()) return;
   const path = writeGateSnapshotPath(basePath);
-  mkdirSync(join(basePath, ".gsd", "runtime"), { recursive: true });
+  ensureWriteGateSnapshotDirectory(basePath);
   const tempPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   writeFileSync(tempPath, JSON.stringify(currentWriteGateSnapshot(basePath), null, 2), "utf-8");
   try {

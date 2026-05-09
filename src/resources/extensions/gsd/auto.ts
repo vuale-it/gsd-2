@@ -1047,8 +1047,12 @@ export function _resolveAutoWorktreeExitActionForTest(
   milestoneMergedInPhases: boolean,
   milestoneComplete: boolean,
 ): AutoWorktreeExitAction {
-  if (!currentMilestoneId || milestoneMergedInPhases) return "skip";
-  return milestoneComplete ? "merge" : "preserve";
+  const action = _selectStopAutoWorktreeExit({
+    currentMilestoneId: currentMilestoneId ?? null,
+    milestoneComplete,
+    milestoneMergedInPhases,
+  });
+  return action === "none" ? "skip" : action;
 }
 
 export async function stopAuto(

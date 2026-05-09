@@ -1,3 +1,4 @@
+// GSD2 - Agent session workspace-root refresh regression tests
 // Regression test for #3616: newSession() must restore the full tool set
 // when cwd is unchanged.
 //
@@ -26,7 +27,7 @@ import { SettingsManager } from "./settings-manager.js";
 
 let testDir: string;
 
-async function createSession(): Promise<AgentSession> {
+async function createSession(options: { workspaceRootRef?: { current: string } } = {}): Promise<AgentSession> {
 	const agentDir = join(testDir, "agent-home");
 	const authStorage = AuthStorage.inMemory({});
 	const modelRegistry = new ModelRegistry(authStorage, join(agentDir, "models.json"));
@@ -48,6 +49,7 @@ async function createSession(): Promise<AgentSession> {
 		cwd: testDir,
 		resourceLoader,
 		modelRegistry,
+		workspaceRootRef: options.workspaceRootRef,
 	});
 }
 
@@ -154,5 +156,17 @@ describe("#3616 — newSession() restores narrowed tool set when cwd unchanged",
 			true,
 			"explicit workspaceRoot rebuild must pass includeAllExtensionTools: true",
 		);
+	});
+
+	it("updates provider workspace root ref when newSession uses explicit workspaceRoot", async () => {
+		const workspaceRootRef = { current: "" };
+		const session = await createSession({ workspaceRootRef });
+		const explicitWorkspaceRoot = mkdtempSync(join(testDir, "provider-workspace-"));
+
+		assert.equal(workspaceRootRef.current, testDir);
+
+		const ok = await session.newSession({ workspaceRoot: explicitWorkspaceRoot });
+		assert.equal(ok, true);
+		assert.equal(workspaceRootRef.current, explicitWorkspaceRoot);
 	});
 });

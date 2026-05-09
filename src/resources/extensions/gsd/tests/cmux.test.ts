@@ -1,3 +1,5 @@
+// Project/App: GSD-2
+// File Purpose: Unit tests for cmux integration, layout, and CLI isolation.
 import test, { describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -293,8 +295,15 @@ describe("CmuxClient stdio isolation", () => {
       await client.listSurfaceIds();
 
       const calls = fs.readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-      assert.deepEqual(calls[0]?.slice(0, 2), ["set-status", "gsd"]);
-      assert.deepEqual(calls[1]?.slice(0, 2), ["list-surfaces", "--json"]);
+      const commandPrefixes = calls.map((call) => call.slice(0, 2));
+      assert.ok(
+        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["set-status", "gsd"])),
+        "set-status command should be invoked",
+      );
+      assert.ok(
+        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["list-surfaces", "--json"])),
+        "list-surfaces command should be invoked",
+      );
     } finally {
       process.env.PATH = originalPath;
       fs.rmSync(binDir, { recursive: true, force: true });

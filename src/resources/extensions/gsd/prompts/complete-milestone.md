@@ -16,7 +16,7 @@ Preloaded context includes roadmap, requirements, decisions, project context, an
 
 Start with what the excerpts give you. Read full files when the section heads signal richer context you need.
 
-**On-demand Read ordering:** Complete all slice SUMMARY Reads you need for cross-slice synthesis, the Decision Re-evaluation table, and LEARNINGS **before** calling `gsd_complete_milestone` (step 12). Once that tool runs, the milestone is marked complete in the DB, so it must be the final persistent milestone-closeout write.
+**On-demand Read ordering:** Complete all slice SUMMARY Reads you need for cross-slice synthesis, the Decision Re-evaluation table, and LEARNINGS **before** calling `gsd_complete_milestone` (step 13). Once that tool runs, the milestone is marked complete in the DB, so it must be the final persistent milestone-closeout write.
 
 ### Closeout Review Mode
 
@@ -45,7 +45,7 @@ Subagents report only; they do not write user source. Fold any findings into Dec
 
 ### Verification Gate — STOP if verification failed
 
-**If ANY verification failure was recorded in steps 3, 4, or 5, you MUST follow the failure path below. Do NOT proceed with steps 9–13.**
+**If ANY verification failure was recorded in steps 4, 5, or 6, you MUST follow the failure path below. Do NOT proceed with steps 10–14.**
 
 **Failure path** (verification failed):
 - Do NOT call `gsd_complete_milestone`.
@@ -69,13 +69,15 @@ Subagents report only; they do not write user source. Fold any findings into Dec
    - `title` (string) — Milestone title
    - `oneLiner` (string) — One-sentence summary of what the milestone achieved
    - `narrative` (string) — Detailed narrative of what happened during the milestone
+   - `verificationPassed` (boolean) — Must be `true`; confirms code-change verification, success criteria, and definition-of-done checks all passed
+
+   **Recommended parameters** (the schema accepts these as optional, but always fill them in — omitted values render as placeholders such as "Not provided.", "None.", or "(none)"):
    - `successCriteriaResults` (string) — Markdown detailing how each success criterion was met or not met
    - `definitionOfDoneResults` (string) — Markdown detailing how each definition-of-done item was met
    - `requirementOutcomes` (string) — Markdown detailing requirement status transitions with evidence
    - `keyDecisions` (array of strings) — Key architectural/pattern decisions made during the milestone
    - `keyFiles` (array of strings) — Key files created or modified during the milestone
    - `lessonsLearned` (array of strings) — Lessons learned during the milestone
-   - `verificationPassed` (boolean) — Must be `true`; confirms code-change verification, success criteria, and definition-of-done checks all passed
 
    **Optional parameters:**
    - `followUps` (string) — Follow-up items for future milestones
@@ -84,6 +86,6 @@ Subagents report only; they do not write user source. Fold any findings into Dec
 14. Do not commit manually — the system auto-commits your changes after this unit completes.
 - Say: "Milestone {{milestoneId}} complete."
 
-**Important:** Do NOT skip code-change, success-criteria, or definition-of-done verification (steps 3-5). The summary must reflect verified outcomes. Verification failures block completion; there is no override. If a verification tool fails, errors, or returns unexpected output, treat it as failure.
+**Important:** Do NOT skip code-change, success-criteria, or definition-of-done verification (steps 4-6). The summary must reflect verified outcomes. Verification failures block completion; there is no override. If a verification tool fails, errors, or returns unexpected output, treat it as failure.
 
 **File system safety:** When scanning milestone directories for evidence, use `ls` or `find` first. Never pass a directory path (e.g. `tasks/`, `slices/`) to `read`; it only accepts file paths.

@@ -1,3 +1,4 @@
+// GSD2 - Coding agent session factory and runtime wiring
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -439,6 +440,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const workspaceRootRef: { current: string } = { current: cwd };
 
 	agent = new Agent({
 		initialState: {
@@ -491,8 +493,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		getProviderOptions: async (currentModel) => {
 			if (currentModel.provider !== "claude-code") return undefined;
 			const runner = extensionRunnerRef.current;
-			if (!runner?.hasUI()) return undefined;
+			if (!runner?.hasUI()) {
+				return { cwd: workspaceRootRef.current };
+			}
 			return {
+				cwd: workspaceRootRef.current,
 				extensionUIContext: runner.getUIContext(),
 			};
 		},
@@ -636,6 +641,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRegistry,
 		initialActiveToolNames,
 		extensionRunnerRef,
+		workspaceRootRef,
 		isClaudeCodeReady: options.isClaudeCodeReady,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

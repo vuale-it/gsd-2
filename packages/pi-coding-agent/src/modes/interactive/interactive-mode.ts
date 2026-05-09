@@ -1,3 +1,6 @@
+// Project/App: GSD-2
+// File Purpose: Interactive TUI mode and session UI rendering.
+// GSD2 - Interactive TUI mode for coding-agent sessions.
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -212,6 +215,14 @@ export function renderExtensionNotifyInChat(
 	return { rendered: true, statusSpacer: spacer, statusText };
 }
 
+export function renderBlockingErrorBanner(container: Container, message: string | undefined): void {
+	container.clear();
+	if (message === undefined) return;
+
+	container.addChild(new Spacer(1));
+	container.addChild(new Text(theme.fg("error", `Error: ${message}`), 1, 0));
+}
+
 /**
  * Options for InteractiveMode initialization.
  */
@@ -250,6 +261,7 @@ export class InteractiveMode {
 	private adaptiveLayout: AdaptiveLayoutComponent;
 	private statusContainer: Container;
 	private pinnedMessageContainer: Container;
+	private blockingErrorContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
@@ -380,6 +392,7 @@ export class InteractiveMode {
 		}));
 		this.statusContainer = new Container();
 		this.pinnedMessageContainer = new Container();
+		this.blockingErrorContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -587,6 +600,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.pinnedMessageContainer);
+		this.ui.addChild(this.blockingErrorContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
@@ -1891,6 +1905,10 @@ export class InteractiveMode {
 	 * Show a notification for extensions.
 	 */
 	private showExtensionNotify(message: string, type?: ExtensionNotifyType): void {
+		if (type === "error") {
+			this.lastBlockingError = message;
+			renderBlockingErrorBanner(this.blockingErrorContainer, this.lastBlockingError);
+		}
 		const result = renderExtensionNotifyInChat(this.chatContainer, message, type);
 		if (!result.rendered) {
 			return;
@@ -2897,6 +2915,7 @@ export class InteractiveMode {
 
 	showError(errorMessage: string): void {
 		this.lastBlockingError = errorMessage;
+		renderBlockingErrorBanner(this.blockingErrorContainer, this.lastBlockingError);
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
 		this.ui.requestRender();
@@ -2904,6 +2923,8 @@ export class InteractiveMode {
 
 	clearBlockingError(): void {
 		this.lastBlockingError = undefined;
+		renderBlockingErrorBanner(this.blockingErrorContainer, undefined);
+		this.ui.requestRender();
 	}
 
 	showWarning(warningMessage: string): void {
