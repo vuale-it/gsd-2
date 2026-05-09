@@ -1,27 +1,41 @@
 // GSD-2 + src/resources/extensions/gsd/tests/finalize-survivor-branch.test.ts
-// Regression: a thrown error from `_mergeBranchMode` (made fail-loud in
-// commit 68ef58a3c) must be caught at the survivor-finalize call site so
-// bootstrap surfaces an error notify instead of an unhandled exception
-// propagating to the slash-command caller (#5549 post-merge audit, R2).
+// Regression: an error from `_mergeBranchMode` (made fail-loud in commit
+// 68ef58a3c) must be caught at the survivor-finalize call site so bootstrap
+// surfaces an error notify instead of an unhandled exception propagating to
+// the slash-command caller (#5549 post-merge audit, R2).
+//
+// After ADR-016 / slice 7 step E, _finalizeSurvivorBranch takes a
+// WorktreeLifecycle and inspects the typed ExitResult instead of catching a
+// throw — the fakeLifecycle below returns {ok:false, cause} to model the
+// previous throw shape.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { _finalizeSurvivorBranch } from "../auto-start.js";
-import type { WorktreeResolver } from "../worktree-resolver.js";
+import type { WorktreeLifecycle } from "../worktree-lifecycle.js";
 
-interface FakeResolverState {
+interface FakeLifecycleState {
   mergeCalls: Array<{ milestoneId: string }>;
-  shouldThrow?: unknown;
+  causeOnFail?: unknown;
+  innerNotify?: (msg: string, level?: "info" | "warning" | "error" | "success") => void;
 }
 
-function fakeResolver(state: FakeResolverState): WorktreeResolver {
+function fakeLifecycle(state: FakeLifecycleState): WorktreeLifecycle {
   return {
-    mergeAndExit: (milestoneId: string) => {
+    exitMilestone: (
+      milestoneId: string,
+      _opts: { merge: boolean },
+      ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void },
+    ) => {
       state.mergeCalls.push({ milestoneId });
-      if (state.shouldThrow) throw state.shouldThrow;
+      if (state.innerNotify) state.innerNotify = ctx.notify;
+      if (state.causeOnFail !== undefined) {
+        return { ok: false, reason: "teardown-failed", cause: state.causeOnFail };
+      }
+      return { ok: true, merged: true, codeFilesChanged: false };
     },
-  } as unknown as WorktreeResolver;
+  } as unknown as WorktreeLifecycle;
 }
 
 interface FakeUiState {
@@ -39,16 +53,16 @@ function fakeUi(state: FakeUiState): {
 }
 
 test("happy path: survivor merge runs, returns merged:true, info notify announces the merge", () => {
-  const resolverState: FakeResolverState = { mergeCalls: [] };
+  const lcState: FakeLifecycleState = { mergeCalls: [] };
   const uiState: FakeUiState = { notifications: [] };
   const result = _finalizeSurvivorBranch(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M001",
     fakeUi(uiState),
   );
 
   assert.deepEqual(result, { merged: true });
-  assert.deepEqual(resolverState.mergeCalls, [{ milestoneId: "M001" }]);
+  assert.deepEqual(lcState.mergeCalls, [{ milestoneId: "M001" }]);
   assert.equal(uiState.notifications.length, 1);
   assert.equal(uiState.notifications[0].level, "info");
   assert.match(
@@ -57,19 +71,20 @@ test("happy path: survivor merge runs, returns merged:true, info notify announce
   );
 });
 
-test("regression: thrown error from mergeAndExit (e.g. wrong-branch) is caught and surfaced as error notify", () => {
+test("regression: failure from exitMilestone (e.g. wrong-branch) is surfaced as error notify", () => {
   // Pre-PR-5549 commit 5: `_mergeBranchMode` returned false silently.
-  // Post-commit 5: it throws. Without this fix, the throw at auto-start.ts
-  // line ~810 would bubble through `bootstrapAutoSession` to
-  // `startAutoDetached`'s top-level .catch as an unhandled-exception log
-  // — observable as a stack trace instead of a clean failure notification.
+  // Post-commit 5: it throws (caught by Lifecycle and returned as
+  // {ok:false}). Without this fix, an uncaught failure at auto-start.ts
+  // line ~810 would bubble through bootstrapAutoSession to startAutoDetached's
+  // top-level .catch as an unhandled-exception log — observable as a stack
+  // trace instead of a clean failure notification.
   const boom = new Error("dirty working tree blocks checkout");
-  const resolverState: FakeResolverState = { mergeCalls: [], shouldThrow: boom };
+  const lcState: FakeLifecycleState = { mergeCalls: [], causeOnFail: boom };
   const uiState: FakeUiState = { notifications: [] };
 
   // Must not throw.
   const result = _finalizeSurvivorBranch(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M001",
     fakeUi(uiState),
   );
@@ -89,39 +104,43 @@ test("regression: thrown error from mergeAndExit (e.g. wrong-branch) is caught a
   assert.match(uiState.notifications[1].message, /Resolve manually/);
 });
 
-test("non-Error thrown values are stringified into the user-facing message", () => {
-  const resolverState: FakeResolverState = {
+test("non-Error failure causes are stringified into the user-facing message", () => {
+  const lcState: FakeLifecycleState = {
     mergeCalls: [],
-    shouldThrow: "git lock contention",
+    causeOnFail: "git lock contention",
   };
   const uiState: FakeUiState = { notifications: [] };
 
   const result = _finalizeSurvivorBranch(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M001",
     fakeUi(uiState),
   );
 
   assert.equal(result.merged, false);
-  assert.equal(result.error, resolverState.shouldThrow);
   assert.equal(uiState.notifications[1].level, "error");
   assert.match(uiState.notifications[1].message, /git lock contention/);
 });
 
-test("inner notifications from mergeAndExit's NotifyCtx reach the same UI", () => {
-  // The resolver's NotifyCtx must be wired to ui.notify so messages emitted
-  // inside mergeAndExit (e.g. "Milestone Mxxx merged. Pushed to remote.")
+test("inner notifications from exitMilestone's NotifyCtx reach the same UI", () => {
+  // The Lifecycle's NotifyCtx must be wired to ui.notify so messages emitted
+  // inside exitMilestone (e.g. "Milestone Mxxx merged. Pushed to remote.")
   // appear in the same UI stream as the outer notifies.
   const uiState: FakeUiState = { notifications: [] };
   const ui = fakeUi(uiState);
 
-  const resolver = {
-    mergeAndExit: (_milestoneId: string, ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void }) => {
+  const lifecycle = {
+    exitMilestone: (
+      _milestoneId: string,
+      _opts: { merge: boolean },
+      ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void },
+    ) => {
       ctx.notify("Milestone M001 merged.", "success");
+      return { ok: true, merged: true, codeFilesChanged: false };
     },
-  } as unknown as WorktreeResolver;
+  } as unknown as WorktreeLifecycle;
 
-  const result = _finalizeSurvivorBranch(resolver, "M001", ui);
+  const result = _finalizeSurvivorBranch(lifecycle, "M001", ui);
 
   assert.equal(result.merged, true);
   // 1: outer announce

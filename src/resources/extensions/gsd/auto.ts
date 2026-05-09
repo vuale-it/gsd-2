@@ -166,8 +166,6 @@ import {
   mergeMilestoneToMain,
   autoWorktreeBranch,
   syncWorktreeStateBack,
-  syncProjectRootToWorktree,
-  syncStateToProjectRoot,
   readResourceVersion,
   checkResourcesStale,
   escapeStaleWorktree,
@@ -242,19 +240,17 @@ import { createAutoOrchestrator } from "./auto/orchestrator.js";
 import type { AutoOrchestrationModule, AutoOrchestratorDeps } from "./auto/contracts.js";
 import { reconcileBeforeDispatch } from "./state-reconciliation.js";
 import { compileUnitToolContract } from "./tool-contract.js";
-import { prepareUnitRoot } from "./worktree-safety.js";
+import { createWorktreeSafetyModule } from "./worktree-safety.js";
+import { resolveManifest } from "./unit-context-manifest.js";
 import { classifyFailure } from "./recovery-classification.js";
 // Slice-level parallelism (#2340)
 import { getEligibleSlices } from "./slice-parallel-eligibility.js";
 import { startSliceParallel } from "./slice-parallel-orchestrator.js";
 import {
-  WorktreeResolver,
-  type WorktreeResolverDeps,
-} from "./worktree-resolver.js";
-import {
   WorktreeLifecycle,
   type WorktreeLifecycleDeps,
 } from "./worktree-lifecycle.js";
+import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { reorderForCaching } from "./prompt-ordering.js";
 import { initTokenCounter } from "./token-counter.js";
 
@@ -1176,7 +1172,7 @@ export async function stopAuto(
         const notifyCtx = ctx
           ? { notify: ctx.ui.notify.bind(ctx.ui) }
           : { notify: () => {} };
-        const resolver = buildResolver();
+        const lifecycle = buildLifecycle();
 
         // Check if the milestone is complete. DB status is the authoritative
         // signal — only a successful gsd_complete_milestone call flips it to
@@ -1222,12 +1218,20 @@ export async function stopAuto(
 
         if (exitAction === "merge") {
           // Milestone is complete — merge worktree branch back to main
-          resolver.mergeAndExit(s.currentMilestoneId, notifyCtx);
+          const r = lifecycle.exitMilestone(
+            s.currentMilestoneId,
+            { merge: true },
+            notifyCtx,
+          );
+          if (!r.ok && r.cause instanceof Error) throw r.cause;
         } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
-          resolver.exitMilestone(s.currentMilestoneId, notifyCtx, {
-            preserveBranch: true,
-          });
+          const r = lifecycle.exitMilestone(
+            s.currentMilestoneId,
+            { merge: false, preserveBranch: true },
+            notifyCtx,
+          );
+          if (!r.ok && r.cause instanceof Error) throw r.cause;
         }
       }
     } catch (e) {
@@ -1550,74 +1554,36 @@ export async function pauseAuto(
 }
 
 /**
- * Build a WorktreeResolverDeps from auto.ts private scope.
- * Shared by buildResolver() and buildLoopDeps().
- */
-function buildResolverDeps(): WorktreeResolverDeps {
-  return {
-    isInAutoWorktree,
-    shouldUseWorktreeIsolation,
-    getIsolationMode,
-    mergeMilestoneToMain,
-    syncWorktreeStateBack,
-    teardownAutoWorktree,
-    createAutoWorktree,
-    enterAutoWorktree,
-    enterBranchModeForMilestone,
-    getAutoWorktreePath,
-    autoCommitCurrentBranch,
-    getCurrentBranch,
-    checkoutBranch: nativeCheckoutBranch,
-    autoWorktreeBranch,
-    resolveMilestoneFile,
-    readFileSync: (path: string, encoding: string) =>
-      readFileSync(path, encoding as BufferEncoding),
-    GitServiceImpl:
-      GitServiceImpl as unknown as WorktreeResolverDeps["GitServiceImpl"],
-    loadEffectiveGSDPreferences:
-      loadEffectiveGSDPreferences as unknown as WorktreeResolverDeps["loadEffectiveGSDPreferences"],
-    invalidateAllCaches,
-    captureIntegrationBranch,
-  };
-}
-
-/**
- * Build a WorktreeResolver wrapping the current session.
- * Cheap to construct — it's just a thin wrapper over `s` + deps.
- * Used by stopAuto(), resume path, and buildLoopDeps().
- */
-function buildResolver(): WorktreeResolver {
-  return new WorktreeResolver(s, buildResolverDeps());
-}
-
-/**
  * Build a WorktreeLifecycle Module wrapping the current session.
  *
  * Per ADR-016, the Lifecycle Module is the typed-Interface owner of milestone
- * entry/exit verbs. Phase 1 (issue #5585) ships only `enterMilestone`; the
- * remaining verbs migrate from `WorktreeResolver` in subsequent slices.
- *
+ * entry/exit/merge verbs and calls Projection on lifecycle transitions. The
+ * deps bag is intentionally focused — Lifecycle does not see the wider auto-
+ * mode dependency graph.
  */
-function buildLifecycleDeps(): WorktreeLifecycleDeps {
-  const deps = buildResolverDeps();
-  return {
-    enterAutoWorktree: deps.enterAutoWorktree,
-    createAutoWorktree: deps.createAutoWorktree,
-    enterBranchModeForMilestone: deps.enterBranchModeForMilestone,
-    getAutoWorktreePath: deps.getAutoWorktreePath,
-    getIsolationMode: deps.getIsolationMode,
-    invalidateAllCaches: deps.invalidateAllCaches,
-    GitServiceImpl: deps.GitServiceImpl,
-    loadEffectiveGSDPreferences: deps.loadEffectiveGSDPreferences,
-  };
-}
-
 function buildLifecycle(): WorktreeLifecycle {
-  return new WorktreeLifecycle(
-    s,
-    buildLifecycleDeps(),
-    () => buildResolver(),
-  );
+  const lifecycleDeps = {
+    enterAutoWorktree,
+    createAutoWorktree,
+    enterBranchModeForMilestone,
+    getAutoWorktreePath,
+    getIsolationMode,
+    invalidateAllCaches,
+    GitServiceImpl,
+    loadEffectiveGSDPreferences,
+    worktreeProjection: new WorktreeStateProjection(),
+    isInAutoWorktree,
+    autoCommitCurrentBranch,
+    autoWorktreeBranch,
+    teardownAutoWorktree,
+    mergeMilestoneToMain,
+    getCurrentBranch,
+    checkoutBranch: nativeCheckoutBranch,
+    resolveMilestoneFile,
+    readFileSync: (path: string, encoding: string) =>
+      readFileSync(path, encoding as BufferEncoding),
+  } as unknown as WorktreeLifecycleDeps;
+  return new WorktreeLifecycle(s, lifecycleDeps);
 }
 
 /**
@@ -1693,9 +1659,34 @@ export function createWiredAutoOrchestrationModule(
     },
     worktree: {
       async prepareForUnit(unitType, unitId) {
-        const result = prepareUnitRoot(unitType, unitId, { basePath: dispatchBasePath });
-        if (!result.ok) return { ok: false, reason: result.detail };
-        return { ok: true, reason: result.reason };
+        const manifest = resolveManifest(unitType);
+        if (!manifest) {
+          return {
+            ok: false,
+            reason: `No Unit manifest is registered for ${unitType}`,
+          };
+        }
+        const writeScope =
+          manifest.tools.mode === "all" || manifest.tools.mode === "docs"
+            ? "source-writing"
+            : "planning-only";
+        const safety = createWorktreeSafetyModule();
+        const snapshot = await deriveState(dispatchBasePath);
+        const milestoneId = snapshot.activeMilestone?.id ?? null;
+        const expectedBranch = milestoneId ? autoWorktreeBranch(milestoneId) : null;
+        const result = safety.validateUnitRoot({
+          unitType,
+          unitId,
+          writeScope,
+          projectRoot: runtimeBasePath,
+          unitRoot: dispatchBasePath,
+          milestoneId,
+          expectedBranch,
+        });
+        if (!result.ok) {
+          return { ok: false, reason: `${result.kind}: ${result.reason}` };
+        }
+        return { ok: true, reason: result.kind };
       },
       async syncAfterUnit() {},
       async cleanupOnStop() {},
@@ -1794,6 +1785,7 @@ function buildLoopDeps(pi: ExtensionAPI): LoopDeps {
   initRegistry(convertDispatchRules(DISPATCH_RULES));
 
   const cmux = makeCmuxEmitters(pi);
+  const worktreeProjection = new WorktreeStateProjection();
 
   return {
     lockBase,
@@ -1817,8 +1809,8 @@ function buildLoopDeps(pi: ExtensionAPI): LoopDeps {
     // Pre-dispatch health gate
     preDispatchHealthGate,
 
-    // Worktree sync
-    syncProjectRootToWorktree,
+    // Worktree state projection (ADR-016 — single Module Interface)
+    worktreeProjection,
 
     // Resource version guard
     checkResourcesStale,
@@ -1890,10 +1882,8 @@ function buildLoopDeps(pi: ExtensionAPI): LoopDeps {
     // Git
     GitServiceImpl: GitServiceImpl as unknown as LoopDeps["GitServiceImpl"],
 
-    // WorktreeResolver
-    resolver: buildResolver(),
-
-    // Worktree Lifecycle Module (ADR-016)
+    // Worktree Lifecycle Module (ADR-016 — single Module Interface for the
+    // milestone create/enter/exit/merge verbs)
     lifecycle: buildLifecycle(),
 
     // Post-unit processing
@@ -2312,7 +2302,6 @@ export async function startAuto(
     shouldUseWorktreeIsolation,
     registerSigtermHandler,
     lockBase,
-    buildResolver,
     buildLifecycle,
   };
 

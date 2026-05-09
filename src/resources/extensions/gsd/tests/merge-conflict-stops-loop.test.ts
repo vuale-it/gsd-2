@@ -33,10 +33,38 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { WorktreeResolver } from "../worktree-resolver.ts";
+import { WorktreeLifecycle, type WorktreeLifecycleDeps } from "../worktree-lifecycle.ts";
+import { WorktreeStateProjection } from "../worktree-state-projection.ts";
 import { MergeConflictError } from "../git-service.ts";
-import type { WorktreeResolverDeps } from "../worktree-resolver.ts";
 import type { AutoSession } from "../auto/session.ts";
+
+// Test-local: LegacyTestDeps had three fields Lifecycle does not need
+// (shouldUseWorktreeIsolation, syncWorktreeStateBack, captureIntegrationBranch).
+// Permit them in test fixtures so existing override patterns keep working —
+// Lifecycle ignores the extras via structural typing.
+type LegacyTestDeps = WorktreeLifecycleDeps & {
+  shouldUseWorktreeIsolation?: () => boolean;
+  syncWorktreeStateBack?: (
+    mainBasePath: string,
+    worktreePath: string,
+    milestoneId: string,
+  ) => { synced: string[] };
+  captureIntegrationBranch?: (basePath: string, mid: string | undefined) => void;
+};
+
+/**
+ * Shim factory preserving the legacy WorktreeResolver throw shape for
+ * `mergeAndExit` so the existing assert.throws bodies migrate verbatim.
+ */
+function makeResolver(s: AutoSession, deps: LegacyTestDeps) {
+  const lifecycle = new WorktreeLifecycle(s, deps);
+  return {
+    mergeAndExit: (mid: string, ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void }) => {
+      const r = lifecycle.exitMilestone(mid, { merge: true }, ctx);
+      if (!r.ok && r.cause instanceof Error) throw r.cause;
+    },
+  };
+}
 
 // ─── Test-only session double ───────────────────────────────────────────
 // `AutoSession` is a large class but `WorktreeResolver` only reads a few
@@ -55,8 +83,8 @@ function makeSession(basePath: string): AutoSession {
  * boring-tech approach — no mocking library, just plain objects.
  */
 function makeDeps(
-  overrides: Partial<WorktreeResolverDeps> = {},
-): WorktreeResolverDeps {
+  overrides: Partial<LegacyTestDeps> = {},
+): LegacyTestDeps {
   return {
     isInAutoWorktree: () => true,
     shouldUseWorktreeIsolation: () => true,
@@ -80,6 +108,7 @@ function makeDeps(
     loadEffectiveGSDPreferences: () => ({ preferences: {} }),
     invalidateAllCaches: () => undefined,
     captureIntegrationBranch: () => undefined,
+    worktreeProjection: new WorktreeStateProjection(),
     ...overrides,
   };
 }
@@ -126,7 +155,7 @@ describe("WorktreeResolver.mergeAndExit re-throws MergeConflictError (#2330)", (
       },
     });
 
-    const resolver = new WorktreeResolver(makeSession(baseDir), deps);
+    const resolver = makeResolver(makeSession(baseDir), deps);
     const ctx = makeNotifyCtx();
 
     assert.throws(
@@ -157,7 +186,7 @@ describe("WorktreeResolver.mergeAndExit re-throws MergeConflictError (#2330)", (
       },
     });
 
-    const resolver = new WorktreeResolver(makeSession(baseDir), deps);
+    const resolver = makeResolver(makeSession(baseDir), deps);
     const ctx = makeNotifyCtx();
 
     assert.throws(
@@ -181,7 +210,7 @@ describe("WorktreeResolver.mergeAndExit re-throws MergeConflictError (#2330)", (
       mergeMilestoneToMain: () => ({ pushed: false, codeFilesChanged: true }),
     });
 
-    const resolver = new WorktreeResolver(makeSession(baseDir), deps);
+    const resolver = makeResolver(makeSession(baseDir), deps);
     const ctx = makeNotifyCtx();
 
     // Should not throw — the success path.

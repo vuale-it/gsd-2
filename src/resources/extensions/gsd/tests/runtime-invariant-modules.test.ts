@@ -3,14 +3,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 import { classifyFailure } from "../recovery-classification.js";
 import { reconcileBeforeDispatch } from "../state-reconciliation.js";
 import { compileUnitToolContract } from "../tool-contract.js";
-import { prepareUnitRoot } from "../worktree-safety.js";
 import type { GSDState } from "../types.js";
 
 function makeState(overrides: Partial<GSDState> = {}): GSDState {
@@ -73,46 +69,6 @@ test("Tool Contract fails closed for unknown Units", () => {
 
   assert.equal(result.ok, false);
   assert.equal(!result.ok && result.reason, "unknown-unit-type");
-});
-
-test("Worktree Safety validates source-writing Unit root git metadata", () => {
-  const root = mkdtempSync(join(tmpdir(), "gsd-worktree-safety-"));
-  writeFileSync(join(root, ".git"), "gitdir: /tmp/worktrees/M001\n");
-  try {
-    const result = prepareUnitRoot("execute-task", "M001/S01/T01", { basePath: root });
-
-    assert.equal(result.ok, true);
-    assert.equal(result.ok && result.sourceWriting, true);
-    assert.equal(result.ok && result.reason, "source-writing-root-valid");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("Worktree Safety fails closed when source-writing root lacks git metadata", () => {
-  const root = mkdtempSync(join(tmpdir(), "gsd-worktree-safety-"));
-  try {
-    const result = prepareUnitRoot("execute-task", "M001/S01/T01", { basePath: root });
-
-    assert.equal(result.ok, false);
-    assert.equal(!result.ok && result.reason, "git-metadata-missing");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("Worktree Safety does not require git metadata for planning Units", () => {
-  const root = mkdtempSync(join(tmpdir(), "gsd-worktree-safety-"));
-  try {
-    mkdirSync(join(root, "nested"));
-    const result = prepareUnitRoot("plan-slice", "M001/S01", { basePath: join(root, "nested") });
-
-    assert.equal(result.ok, true);
-    assert.equal(result.ok && result.sourceWriting, false);
-    assert.equal(result.ok && result.reason, "non-source-writing-root");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 test("Recovery Classification covers ADR-015 failure families", () => {

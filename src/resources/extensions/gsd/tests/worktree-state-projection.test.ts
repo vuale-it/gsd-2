@@ -96,3 +96,25 @@ test("projectWorktreeToRoot is idempotent on repeated calls", () => {
     cleanup();
   }
 });
+
+// ─── finalizeProjectionForMerge — Module contract ────────────────────────────
+
+test("finalizeProjectionForMerge exists and accepts a MilestoneScope", () => {
+  const projection = new WorktreeStateProjection();
+  assert.equal(typeof projection.finalizeProjectionForMerge, "function");
+});
+
+test("finalizeProjectionForMerge returns { synced } shape on same-path scope", () => {
+  const { dir, cleanup } = makeProjectRoot();
+  try {
+    const workspace = createWorkspace(dir);
+    const scope = scopeMilestone(workspace, "M001");
+    const projection = new WorktreeStateProjection();
+
+    // Project-only mode (no worktreeRoot) — finalize fast-paths to {synced: []}
+    const result = projection.finalizeProjectionForMerge(scope);
+    assert.ok(Array.isArray(result.synced));
+  } finally {
+    cleanup();
+  }
+});

@@ -2,25 +2,33 @@
 // Regression: bootstrap must actively merge orphan completed-but-unmerged
 // milestones, not just seed `s.currentMilestoneId` (the seed approach was
 // silently overwritten at auto-start.ts:948 — caught in audit of PR #5549).
+//
+// After ADR-016 / slice 7 step E, _mergeOrphanCompletedMilestone takes a
+// WorktreeLifecycle and inspects the typed ExitResult instead of catching
+// a throw — the fakeLifecycle below returns {ok:false, cause} to model the
+// previous throw shape.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { _mergeOrphanCompletedMilestone } from "../auto-start.js";
-import type { WorktreeResolver } from "../worktree-resolver.js";
+import type { WorktreeLifecycle } from "../worktree-lifecycle.js";
 
-interface FakeResolverState {
+interface FakeLifecycleState {
   mergeCalls: Array<{ milestoneId: string }>;
-  shouldThrow?: unknown;
+  causeOnFail?: unknown;
 }
 
-function fakeResolver(state: FakeResolverState): WorktreeResolver {
+function fakeLifecycle(state: FakeLifecycleState): WorktreeLifecycle {
   return {
-    mergeAndExit: (milestoneId: string) => {
+    exitMilestone: (milestoneId: string) => {
       state.mergeCalls.push({ milestoneId });
-      if (state.shouldThrow) throw state.shouldThrow;
+      if (state.causeOnFail !== undefined) {
+        return { ok: false, reason: "teardown-failed", cause: state.causeOnFail };
+      }
+      return { ok: true, merged: true, codeFilesChanged: false };
     },
-  } as unknown as WorktreeResolver;
+  } as unknown as WorktreeLifecycle;
 }
 
 interface FakeUiState {
@@ -38,16 +46,16 @@ function fakeUi(state: FakeUiState): {
 }
 
 test("happy path: orphan merge runs, returns merged:true, emits info notify", () => {
-  const resolverState: FakeResolverState = { mergeCalls: [] };
+  const lcState: FakeLifecycleState = { mergeCalls: [] };
   const uiState: FakeUiState = { notifications: [] };
   const result = _mergeOrphanCompletedMilestone(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M002",
     fakeUi(uiState),
   );
 
   assert.deepEqual(result, { merged: true });
-  assert.deepEqual(resolverState.mergeCalls, [{ milestoneId: "M002" }]);
+  assert.deepEqual(lcState.mergeCalls, [{ milestoneId: "M002" }]);
   assert.equal(uiState.notifications.length, 1);
   assert.deepEqual(uiState.notifications[0], {
     message: "Detected unmerged completed milestone M002. Merging now.",
@@ -55,18 +63,17 @@ test("happy path: orphan merge runs, returns merged:true, emits info notify", ()
   });
 });
 
-test("regression: mergeAndExit throwing (e.g. wrong-branch from PR #5549 commit 5) does not bubble out", () => {
+test("regression: failure from exitMilestone (e.g. wrong-branch from PR #5549 commit 5) does not bubble out", () => {
   // Commit 5 (68ef58a3c) made `_mergeBranchMode` throw on wrong branch
-  // instead of silently returning false. If `_mergeOrphanCompletedMilestone`
-  // didn't catch the throw, bootstrap would surface an unhandled exception
-  // to the slash-command caller — the exact regression risk that motivated
-  // wrapping in try/catch.
+  // instead of silently returning false. Lifecycle now wraps the throw in
+  // {ok:false, cause}; _mergeOrphanCompletedMilestone must surface that as
+  // a notify, never re-throwing into the slash-command caller.
   const boom = new Error("dirty working tree blocks checkout");
-  const resolverState: FakeResolverState = { mergeCalls: [], shouldThrow: boom };
+  const lcState: FakeLifecycleState = { mergeCalls: [], causeOnFail: boom };
   const uiState: FakeUiState = { notifications: [] };
 
   const result = _mergeOrphanCompletedMilestone(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M002",
     fakeUi(uiState),
   );
@@ -86,41 +93,45 @@ test("regression: mergeAndExit throwing (e.g. wrong-branch from PR #5549 commit 
   assert.match(uiState.notifications[1].message, /Resolve manually/);
 });
 
-test("non-Error thrown values are still captured and notified", () => {
-  // Defensive: thrown strings, numbers, etc. must not crash the formatter.
-  const resolverState: FakeResolverState = {
+test("non-Error failure causes are still captured and notified", () => {
+  // Defensive: non-Error causes (strings, numbers) must not crash the formatter.
+  const lcState: FakeLifecycleState = {
     mergeCalls: [],
-    // mimic a thrown non-Error value
-    shouldThrow: "git lock held",
+    // mimic a non-Error cause
+    causeOnFail: "git lock held",
   };
   const uiState: FakeUiState = { notifications: [] };
 
   const result = _mergeOrphanCompletedMilestone(
-    fakeResolver(resolverState),
+    fakeLifecycle(lcState),
     "M002",
     fakeUi(uiState),
   );
 
   assert.equal(result.merged, false);
-  assert.equal(result.error, resolverState.shouldThrow);
   assert.equal(uiState.notifications[1].level, "warning");
   assert.match(uiState.notifications[1].message, /git lock held/);
 });
 
-test("the mergeAndExit call receives a notify-bound NotifyCtx the resolver can invoke", () => {
-  // The resolver's NotifyCtx must be wired to ui.notify so user-facing
-  // messages from inside mergeAndExit (e.g. "Milestone Mxxx merged") still
-  // reach the UI. Verify by having the fake resolver invoke the ctx.notify.
+test("the exitMilestone call receives a notify-bound NotifyCtx the lifecycle can invoke", () => {
+  // The lifecycle's NotifyCtx must be wired to ui.notify so user-facing
+  // messages from inside exitMilestone (e.g. "Milestone Mxxx merged") still
+  // reach the UI. Verify by having the fake invoke ctx.notify.
   const uiState: FakeUiState = { notifications: [] };
   const ui = fakeUi(uiState);
 
-  const resolver = {
-    mergeAndExit: (_milestoneId: string, ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void }) => {
+  const lifecycle = {
+    exitMilestone: (
+      _milestoneId: string,
+      _opts: { merge: boolean },
+      ctx: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void },
+    ) => {
       ctx.notify("inner success message", "success");
+      return { ok: true, merged: true, codeFilesChanged: false };
     },
-  } as unknown as WorktreeResolver;
+  } as unknown as WorktreeLifecycle;
 
-  const result = _mergeOrphanCompletedMilestone(resolver, "M002", ui);
+  const result = _mergeOrphanCompletedMilestone(lifecycle, "M002", ui);
 
   assert.equal(result.merged, true);
   // 1: outer "Detected unmerged completed milestone..."

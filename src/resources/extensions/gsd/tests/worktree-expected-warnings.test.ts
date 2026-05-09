@@ -6,14 +6,14 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-import { _isExpectedWorktreeUnlinkErrorForTest } from "../auto-worktree.ts";
+import { _isExpectedWorktreeUnlinkError } from "../auto-worktree.ts";
 import { resolveGitDir } from "../worktree-manager.ts";
 
 describe("worktree expected-condition warning suppression (#3665)", () => {
   test("known unlink races are classified as expected", () => {
-    assert.equal(_isExpectedWorktreeUnlinkErrorForTest("ENOENT"), true);
-    assert.equal(_isExpectedWorktreeUnlinkErrorForTest("EISDIR"), true);
-    assert.equal(_isExpectedWorktreeUnlinkErrorForTest("EACCES"), false);
+    assert.equal(_isExpectedWorktreeUnlinkError("ENOENT"), true);
+    assert.equal(_isExpectedWorktreeUnlinkError("EISDIR"), true);
+    assert.equal(_isExpectedWorktreeUnlinkError("EACCES"), false);
   });
 
   test("resolveGitDir returns .git directory without reading it as a file", () => {

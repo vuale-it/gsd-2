@@ -95,7 +95,6 @@ import {
   resolveDefaultSessionModel,
   resolveDynamicRoutingConfig,
 } from "./preferences-models.js";
-import type { WorktreeResolver } from "./worktree-resolver.js";
 import type { WorktreeLifecycle } from "./worktree-lifecycle.js";
 import { getSessionModelOverride } from "./session-model-override.js";
 
@@ -103,7 +102,6 @@ export interface BootstrapDeps {
   shouldUseWorktreeIsolation: (basePath?: string) => boolean;
   registerSigtermHandler: (basePath: string) => void;
   lockBase: () => string;
-  buildResolver: () => WorktreeResolver;
   buildLifecycle: () => WorktreeLifecycle;
 }
 
@@ -465,7 +463,7 @@ export function findUnmergedCompletedMilestone(
  * throw — caller decides whether to abort bootstrap.
  */
 export function _finalizeSurvivorBranch(
-  resolver: WorktreeResolver,
+  lifecycle: WorktreeLifecycle,
   milestoneId: string,
   ui: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void },
 ): { merged: boolean; error?: unknown } {
@@ -473,17 +471,19 @@ export function _finalizeSurvivorBranch(
     `Milestone ${milestoneId} is complete but branch/worktree was not finalized. Running merge now.`,
     "info",
   );
-  try {
-    resolver.mergeAndExit(milestoneId, { notify: ui.notify.bind(ui) });
-    return { merged: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    ui.notify(
-      `Survivor-branch finalization for ${milestoneId} failed: ${msg}. Resolve manually and re-run /gsd auto.`,
-      "error",
-    );
-    return { merged: false, error: err };
-  }
+  const result = lifecycle.exitMilestone(
+    milestoneId,
+    { merge: true },
+    { notify: ui.notify.bind(ui) },
+  );
+  if (result.ok) return { merged: true };
+  const err = result.cause instanceof Error ? result.cause : new Error(String(result.cause));
+  const msg = err.message;
+  ui.notify(
+    `Survivor-branch finalization for ${milestoneId} failed: ${msg}. Resolve manually and re-run /gsd auto.`,
+    "error",
+  );
+  return { merged: false, error: err };
 }
 
 /**
@@ -500,22 +500,24 @@ export function _finalizeSurvivorBranch(
  * `tests/orphan-merge-bootstrap.test.ts`.
  */
 export function _mergeOrphanCompletedMilestone(
-  resolver: WorktreeResolver,
+  lifecycle: WorktreeLifecycle,
   orphanId: string,
   ui: { notify: (msg: string, level?: "info" | "warning" | "error" | "success") => void },
 ): { merged: boolean; error?: unknown } {
   ui.notify(`Detected unmerged completed milestone ${orphanId}. Merging now.`, "info");
-  try {
-    resolver.mergeAndExit(orphanId, { notify: ui.notify.bind(ui) });
-    return { merged: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    ui.notify(
-      `Could not merge orphan milestone ${orphanId}: ${msg}. Resolve manually and re-run /gsd auto.`,
-      "warning",
-    );
-    return { merged: false, error: err };
-  }
+  const result = lifecycle.exitMilestone(
+    orphanId,
+    { merge: true },
+    { notify: ui.notify.bind(ui) },
+  );
+  if (result.ok) return { merged: true };
+  const err = result.cause instanceof Error ? result.cause : new Error(String(result.cause));
+  const msg = err.message;
+  ui.notify(
+    `Could not merge orphan milestone ${orphanId}: ${msg}. Resolve manually and re-run /gsd auto.`,
+    "warning",
+  );
+  return { merged: false, error: err };
 }
 
 export async function bootstrapAutoSession(
@@ -532,7 +534,6 @@ export async function bootstrapAutoSession(
     shouldUseWorktreeIsolation,
     registerSigtermHandler,
     lockBase,
-    buildResolver,
     buildLifecycle,
   } = deps;
 
@@ -874,7 +875,7 @@ export async function bootstrapAutoSession(
       // converted into an error notify + clean bootstrap abort, not an
       // unhandled exception propagating to the slash-command caller (#5549
       // post-merge audit, R2).
-      const finalize = _finalizeSurvivorBranch(buildResolver(), mid, ctx.ui);
+      const finalize = _finalizeSurvivorBranch(buildLifecycle(), mid, ctx.ui);
       if (!finalize.merged) {
         return releaseLockAndReturn();
       }
@@ -907,7 +908,7 @@ export async function bootstrapAutoSession(
         const priorOriginalBasePath = s.originalBasePath;
         s.originalBasePath = base;
         s.basePath = getAutoWorktreePath(base, orphan) ?? base;
-        const result = _mergeOrphanCompletedMilestone(buildResolver(), orphan, ctx.ui);
+        const result = _mergeOrphanCompletedMilestone(buildLifecycle(), orphan, ctx.ui);
         if (!result.merged) {
           s.basePath = base;
           s.originalBasePath = base;
@@ -1122,6 +1123,7 @@ export async function bootstrapAutoSession(
         notify: ctx.ui.notify.bind(ctx.ui),
       });
       if (!enterResult.ok) {
+        s.active = false;
         if (enterResult.reason === "lease-conflict") {
           ctx.ui.notify(
             `Cannot enter milestone ${s.currentMilestoneId}: lease is held by another worker.`,
@@ -1135,6 +1137,11 @@ export async function bootstrapAutoSession(
         } else if (enterResult.reason === "invalid-milestone-id") {
           ctx.ui.notify(
             `Cannot enter milestone ${s.currentMilestoneId}: milestone id is invalid.`,
+            "error",
+          );
+        } else {
+          ctx.ui.notify(
+            `Auto-mode bootstrap stopped: failed to enter milestone ${s.currentMilestoneId} (${enterResult.reason}).`,
             "error",
           );
         }

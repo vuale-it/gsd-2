@@ -3,10 +3,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { _resolveAutoWorktreeStartPointForTest } from "../auto-worktree.ts";
+import { _resolveAutoWorktreeStartPoint } from "../auto-worktree.ts";
 
 test("auto-worktree start point prefers milestone integration branch", () => {
-  const startPoint = _resolveAutoWorktreeStartPointForTest(
+  const startPoint = _resolveAutoWorktreeStartPoint(
     "release/integration",
     "dev",
     () => true,
@@ -17,11 +17,11 @@ test("auto-worktree start point prefers milestone integration branch", () => {
 
 test("auto-worktree start point uses git.main_branch only when it exists", () => {
   assert.equal(
-    _resolveAutoWorktreeStartPointForTest(null, "dev", (branch) => branch === "dev"),
+    _resolveAutoWorktreeStartPoint(null, "dev", (branch) => branch === "dev"),
     "dev",
   );
   assert.equal(
-    _resolveAutoWorktreeStartPointForTest(null, "stale", () => false),
+    _resolveAutoWorktreeStartPoint(null, "stale", () => false),
     undefined,
   );
 });

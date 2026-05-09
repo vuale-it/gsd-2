@@ -43,7 +43,8 @@ import {
   diagnoseExpectedArtifact,
 } from "./auto-recovery.js";
 import { regenerateIfMissing } from "./workflow-projections.js";
-import { syncStateToProjectRoot } from "./auto-worktree.js";
+import { WorktreeStateProjection } from "./worktree-state-projection.js";
+import { createWorkspace, scopeMilestone } from "./workspace.js";
 import { normalizeWorktreePathForCompare } from "./worktree-root.js";
 import { isDbAvailable, getTask, getSlice, getMilestone, updateTaskStatus, _getAdapter, getVerificationEvidence } from "./gsd-db.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
@@ -88,6 +89,9 @@ import { validateArtifact } from "./schemas/validate.js";
 function isSamePathLocal(a: string, b: string): boolean {
   return normalizeWorktreePathForCompare(a) === normalizeWorktreePathForCompare(b);
 }
+
+/** Stateless WorktreeStateProjection — methods are pure functions of MilestoneScope. */
+const _worktreeProjection = new WorktreeStateProjection();
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
@@ -651,7 +655,18 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     // Sync worktree state back to project root (skipped for lightweight sidecars)
     if (!opts?.skipWorktreeSync && s.originalBasePath && !isSamePathLocal(s.originalBasePath, s.basePath)) {
       await runSafely("postUnit", "worktree-sync", () => {
-        syncStateToProjectRoot(s.basePath, s.originalBasePath!, s.currentMilestoneId);
+        let scope = s.scope;
+        if (!scope && s.currentMilestoneId) {
+          try {
+            scope = scopeMilestone(createWorkspace(s.basePath), s.currentMilestoneId);
+          } catch {
+            // Non-fatal: scope construction can fail on synthetic test paths;
+            // skipping the projection mirrors the prior path-string variant's
+            // early-return behaviour for missing milestone/path inputs.
+            scope = null;
+          }
+        }
+        if (scope) _worktreeProjection.projectWorktreeToRoot(scope);
       });
     }
 

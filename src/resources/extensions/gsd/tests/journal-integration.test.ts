@@ -17,6 +17,7 @@ import { join } from "node:path";
 
 import type { JournalEntry } from "../journal.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
+import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { IterationContext, LoopState, PreDispatchData, IterationData } from "../auto/types.js";
 import type { SessionLockStatus } from "../session-lock.js";
 import { runDispatch, runUnitPhase, runPreDispatch, runFinalize } from "../auto/phases.js";
@@ -65,7 +66,6 @@ function makeMockDeps(
     }) as any,
     loadEffectiveGSDPreferences: () => ({ preferences: {} }),
     preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-    syncProjectRootToWorktree: () => {},
     checkResourcesStale: () => null,
     validateSessionLock: () => ({ valid: true }) as SessionLockStatus,
     updateSessionLock: () => {},
@@ -124,14 +124,7 @@ function makeMockDeps(
     readFileSync: () => "",
     atomicWriteSync: () => {},
     GitServiceImpl: class {} as any,
-    resolver: {
-      get workPath() { return "/tmp/project"; },
-      get projectRoot() { return "/tmp/project"; },
-      get lockPath() { return "/tmp/project"; },
-      exitMilestone: () => {},
-      mergeAndExit: () => {},
-      mergeAndEnterNext: () => {},
-    } as any,
+    worktreeProjection: new WorktreeStateProjection(),
     lifecycle: {
       enterMilestone: () => ({ ok: true, mode: "worktree", path: "/tmp/project" }),
       exitMilestone: (_mid: string, opts: { merge: boolean }) => ({

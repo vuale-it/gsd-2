@@ -4,11 +4,25 @@ import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  WorktreeResolver,
-  type WorktreeResolverDeps,
+  WorktreeLifecycle,
+  type WorktreeLifecycleDeps,
   type NotifyCtx,
-} from "../worktree-resolver.js";
-import { WorktreeLifecycle } from "../worktree-lifecycle.js";
+} from "../worktree-lifecycle.js";
+import { WorktreeStateProjection } from "../worktree-state-projection.js";
+
+// Test-local: LegacyTestDeps had three fields Lifecycle does not need
+// (shouldUseWorktreeIsolation, syncWorktreeStateBack, captureIntegrationBranch).
+// Permit them in test fixtures so existing override patterns keep working —
+// Lifecycle ignores the extras via structural typing.
+type LegacyTestDeps = WorktreeLifecycleDeps & {
+  shouldUseWorktreeIsolation?: () => boolean;
+  syncWorktreeStateBack?: (
+    mainBasePath: string,
+    worktreePath: string,
+    milestoneId: string,
+  ) => { synced: string[] };
+  captureIntegrationBranch?: (basePath: string, mid: string | undefined) => void;
+};
 import { AutoSession } from "../auto/session.js";
 import type { JournalEntry } from "../journal.js";
 
@@ -24,9 +38,9 @@ function makeSession(
 }
 
 function makeDeps(
-  overrides?: Partial<WorktreeResolverDeps>,
-): WorktreeResolverDeps {
-  const deps: WorktreeResolverDeps = {
+  overrides?: Partial<LegacyTestDeps>,
+): LegacyTestDeps {
+  const deps: LegacyTestDeps = {
     isInAutoWorktree: () => false,
     shouldUseWorktreeIsolation: () => true,
     getIsolationMode: () => "worktree",
@@ -47,11 +61,12 @@ function makeDeps(
     readFileSync: () => "# Roadmap\n- [x] S01: Slice one\n",
     GitServiceImpl: class {
       constructor() {}
-    } as unknown as WorktreeResolverDeps["GitServiceImpl"],
+    } as unknown as LegacyTestDeps["GitServiceImpl"],
     loadEffectiveGSDPreferences: () => ({ preferences: { git: {} } }),
     invalidateAllCaches: () => {},
     captureIntegrationBranch: () => {},
     enterBranchModeForMilestone: () => {},
+    worktreeProjection: new WorktreeStateProjection(),
     ...overrides,
   };
   return deps;
@@ -101,8 +116,6 @@ describe("worktree journal events", () => {
   test("enterMilestone emits worktree-enter on success (new worktree)", () => {
     const s = makeSession({ basePath: tmp, originalBasePath: tmp });
     const deps = makeDeps({ getAutoWorktreePath: () => null });
-    const resolver = new WorktreeResolver(s, deps);
-
     new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
@@ -118,8 +131,6 @@ describe("worktree journal events", () => {
     const deps = makeDeps({
       getAutoWorktreePath: () => "/project/.gsd/worktrees/M001",
     });
-    const resolver = new WorktreeResolver(s, deps);
-
     new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
@@ -131,8 +142,6 @@ describe("worktree journal events", () => {
   test("enterMilestone emits worktree-skip when isolation disabled", () => {
     const s = makeSession({ basePath: tmp, originalBasePath: tmp });
     const deps = makeDeps({ shouldUseWorktreeIsolation: () => false, getIsolationMode: () => "none" });
-    const resolver = new WorktreeResolver(s, deps);
-
     new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
@@ -148,8 +157,6 @@ describe("worktree journal events", () => {
       getAutoWorktreePath: () => null,
       createAutoWorktree: () => { throw new Error("disk full"); },
     });
-    const resolver = new WorktreeResolver(s, deps);
-
     new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);
@@ -169,9 +176,11 @@ describe("worktree journal events", () => {
       isInAutoWorktree: () => true,
       getIsolationMode: () => "worktree",
     });
-    const resolver = new WorktreeResolver(s, deps);
-
-    resolver.mergeAndExit("M001", makeNotifyCtx());
+    new WorktreeLifecycle(s, deps).exitMilestone(
+      "M001",
+      { merge: true },
+      makeNotifyCtx(),
+    );
 
     const entries = readJournalEntries(tmp);
     const start = entries.find(e => e.eventType === "worktree-merge-start");
@@ -190,14 +199,24 @@ describe("worktree journal events", () => {
       getIsolationMode: () => "worktree",
       mergeMilestoneToMain: () => { throw new Error("conflict in main"); },
     });
-    const resolver = new WorktreeResolver(s, deps);
-
     // Since #4380, mergeAndExit re-throws all errors after emitting the journal
-    // event and restoring state — callers must handle the throw.
-    assert.throws(
-      () => resolver.mergeAndExit("M001", makeNotifyCtx()),
-      /conflict in main/,
+    // event and restoring state. Lifecycle now wraps that throw in a typed
+    // ExitResult — failure surfaces as ok:false / cause.
+    const result = new WorktreeLifecycle(s, deps).exitMilestone(
+      "M001",
+      { merge: true },
+      makeNotifyCtx(),
     );
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "teardown-failed");
+      assert.match(
+        result.cause instanceof Error
+          ? result.cause.message
+          : String(result.cause),
+        /conflict in main/,
+      );
+    }
 
     const entries = readJournalEntries(tmp);
     const failed = entries.find(e => e.eventType === "worktree-merge-failed");
@@ -209,8 +228,6 @@ describe("worktree journal events", () => {
   test("journal entries have valid flowId, seq, and ts fields", () => {
     const s = makeSession({ basePath: tmp, originalBasePath: tmp });
     const deps = makeDeps({ shouldUseWorktreeIsolation: () => false });
-    const resolver = new WorktreeResolver(s, deps);
-
     new WorktreeLifecycle(s, deps).enterMilestone("M001", makeNotifyCtx());
 
     const entries = readJournalEntries(tmp);

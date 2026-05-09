@@ -166,7 +166,8 @@ test("runFinalize merges a verified complete-milestone immediately and only once
 
   const s = new AutoSession();
   const startedAt = Date.now();
-  let mergeCalls = 0;
+  let lifecycleMergeCalls = 0;
+  let resolverMergeCalls = 0;
   s.basePath = base;
   s.originalBasePath = base;
   s.currentMilestoneId = "M001";
@@ -181,19 +182,20 @@ test("runFinalize merges a verified complete-milestone immediately and only once
     postflightPopStash: () => ({ needsManualRecovery: false }),
     resolver: {
       mergeAndExit() {
-        mergeCalls++;
+        resolverMergeCalls++;
       },
     },
     lifecycle: {
       exitMilestone(_mid: string, opts: { merge: boolean }) {
-        if (opts.merge) mergeCalls++;
+        if (opts.merge) lifecycleMergeCalls++;
         return { ok: true, merged: opts.merge, codeFilesChanged: false };
       },
     },
   });
 
   assert.equal(result.action, "next");
-  assert.equal(mergeCalls, 1);
+  assert.equal(lifecycleMergeCalls, 1);
+  assert.equal(resolverMergeCalls, 0);
   assert.equal(s.milestoneMergedInPhases, true);
 
   s.currentUnit = {
@@ -206,17 +208,18 @@ test("runFinalize merges a verified complete-milestone immediately and only once
     postflightPopStash: () => ({ needsManualRecovery: false }),
     resolver: {
       mergeAndExit() {
-        mergeCalls++;
+        resolverMergeCalls++;
       },
     },
     lifecycle: {
       exitMilestone(_mid: string, opts: { merge: boolean }) {
-        if (opts.merge) mergeCalls++;
+        if (opts.merge) lifecycleMergeCalls++;
         return { ok: true, merged: opts.merge, codeFilesChanged: false };
       },
     },
   });
 
   assert.equal(second.action, "next");
-  assert.equal(mergeCalls, 1);
+  assert.equal(lifecycleMergeCalls, 1);
+  assert.equal(resolverMergeCalls, 0);
 });

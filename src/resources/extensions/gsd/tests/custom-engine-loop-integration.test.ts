@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { autoLoop } from "../auto/loop.js";
 import { resolveAgentEnd, _hasPendingResolveForTest, _resetPendingResolve } from "../auto/resolve.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
+import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { SessionLockStatus } from "../session-lock.js";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { writeFileSync } from "node:fs";
@@ -172,7 +173,6 @@ function makeMockDeps(overrides?: Partial<LoopDeps>): LoopDeps & { callLog: stri
     rebuildState: async () => {},
     loadEffectiveGSDPreferences: () => undefined,
     preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-    syncProjectRootToWorktree: () => {},
     checkResourcesStale: () => null,
     validateSessionLock: () => ({ valid: true } as SessionLockStatus),
     updateSessionLock: () => {},
@@ -228,26 +228,19 @@ function makeMockDeps(overrides?: Partial<LoopDeps>): LoopDeps & { callLog: stri
     readFileSync: () => "",
     atomicWriteSync: () => {},
     GitServiceImpl: class {} as any,
-    resolver: {
-      get workPath() { return "/tmp/project"; },
-      get projectRoot() { return "/tmp/project"; },
-      get lockPath() { return "/tmp/project"; },
-      enterMilestone: () => {
-        assert.fail("custom-engine loop should call deps.lifecycle.enterMilestone, not resolver.enterMilestone");
-      },
-      exitMilestone: () => {
-        assert.fail("custom-engine loop should not call resolver.exitMilestone");
-      },
-      mergeAndExit: () => {
-        assert.fail("custom-engine loop should not call resolver.mergeAndExit");
-      },
-      mergeAndEnterNext: () => {
-        assert.fail("custom-engine loop should not call resolver.mergeAndEnterNext");
-      },
-    } as any,
     lifecycle: {
-      enterMilestone: () => ({ ok: true, mode: "worktree", path: "/tmp/project" }),
+      enterMilestone: () => ({ ok: true, mode: "none", path: "/tmp/project" }),
+      exitMilestone: (_mid: string, opts: { merge: boolean }) => ({
+        ok: true,
+        merged: opts.merge,
+        codeFilesChanged: false,
+      }),
+      degradeToBranchMode: () => {},
+      restoreToProjectRoot: () => {},
+      isInMilestone: () => true,
+      getCurrentMilestoneIfAny: () => "M001",
     } as any,
+    worktreeProjection: new WorktreeStateProjection(),
     postUnitPreVerification: async () => "continue" as const,
     runPostUnitVerification: async () => "continue" as const,
     postUnitPostVerification: async () => "continue" as const,

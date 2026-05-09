@@ -18,7 +18,6 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
-  statSync,
   lstatSync as lstatSyncFn,
 } from "node:fs";
 import { isAbsolute, join, relative, sep as pathSep } from "node:path";
@@ -35,7 +34,6 @@ import {
 } from "./gsd-db.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { execFileSync } from "node:child_process";
-import { safeCopy, safeCopyRecursive } from "./safe-fs.js";
 import { gsdRoot, resolveGsdPathContract } from "./paths.js";
 import {
   createWorktree,
@@ -83,6 +81,11 @@ import {
 } from "./native-git-bridge.js";
 import { gsdHome } from "./gsd-home.js";
 import { type MilestoneScope, type GsdWorkspace, createWorkspace } from "./workspace.js";
+import {
+  _finalizeProjectionForMergeImpl,
+  _projectRootToWorktreeImpl,
+  _projectWorktreeToRootImpl,
+} from "./worktree-state-projection.js";
 
 const PROJECT_PREFERENCES_FILE = "PREFERENCES.md";
 const LEGACY_PROJECT_PREFERENCES_FILE = "preferences.md";
@@ -114,11 +117,6 @@ const ROOT_STATE_FILES = [
   // Forward-sync (main → worktree) is handled explicitly in syncGsdStateToWorktree().
   // Back-sync (worktree → main) must NEVER overwrite the project root's copy
   // because the project root is authoritative for preferences (#2684).
-] as const;
-
-const ROOT_DIAGNOSTIC_FILES = [
-  "completed-units.json",
-  "metrics.json",
 ] as const;
 
 /**
@@ -195,11 +193,11 @@ function isSamePath(a: string, b: string): boolean {
   }
 }
 
-export function _isSamePathForTest(a: string, b: string): boolean {
+export function _isSamePath(a: string, b: string): boolean {
   return isSamePath(a, b);
 }
 
-export function _resolveAutoWorktreeStartPointForTest(
+export function _resolveAutoWorktreeStartPoint(
   integrationBranch: string | null | undefined,
   gitMainBranch: string | null | undefined,
   branchExists: (branch: string) => boolean,
@@ -213,7 +211,7 @@ export function _resolveAutoWorktreeStartPointForTest(
     : undefined;
 }
 
-export function _shouldReconcileWorktreeDbForTest(
+export function _shouldReconcileWorktreeDb(
   worktreeDbPath: string,
   mainDbPath: string,
   pathExists: (path: string) => boolean = existsSync,
@@ -222,7 +220,7 @@ export function _shouldReconcileWorktreeDbForTest(
   return pathExists(worktreeDbPath) && !samePath(worktreeDbPath, mainDbPath);
 }
 
-export function _isExpectedWorktreeUnlinkErrorForTest(
+export function _isExpectedWorktreeUnlinkError(
   code: string | undefined,
 ): boolean {
   return code === "ENOENT" || code === "EISDIR";
@@ -235,70 +233,6 @@ function stripGsdDisplayPrefix(value: string | undefined | null, id: string): st
   const idLower = id.toLowerCase();
   if (lower.startsWith(`${idLower}:`)) return raw.slice(id.length + 1).trim() || undefined;
   return raw;
-}
-
-// ─── ASSESSMENT Force-Sync Helper (#2821) ─────────────────────────────────
-
-/** Regex matching YAML frontmatter `verdict:` field. */
-const VERDICT_RE = /verdict:\s*[\w-]+/i;
-
-/**
- * Walk a milestone directory and force-overwrite ASSESSMENT files in the
- * destination when the source copy contains a `verdict:` field.
- *
- * This is the targeted fix for the UAT stuck-loop (#2821): the main
- * safeCopyRecursive uses force:false to protect worktree-local projection
- * files (#1886), but ASSESSMENT files written by run-uat must be
- * forward-synced when the project root has a verdict. Without this,
- * the worktree retains a stale FAIL or missing ASSESSMENT and
- * checkNeedsRunUat re-dispatches run-uat indefinitely.
- *
- * Only overwrites when the source has a verdict — never clobbers a
- * worktree ASSESSMENT with a verdictless project-root copy.
- */
-function forceOverwriteAssessmentsWithVerdict(
-  srcMilestoneDir: string,
-  dstMilestoneDir: string,
-): void {
-  if (!existsSync(srcMilestoneDir)) return;
-
-  // Walk slices/<SID>/ looking for *-ASSESSMENT.md files
-  const slicesDir = join(srcMilestoneDir, "slices");
-  if (!existsSync(slicesDir)) return;
-
-  try {
-    for (const sliceEntry of readdirSync(slicesDir, { withFileTypes: true })) {
-      if (!sliceEntry.isDirectory()) continue;
-      const srcSliceDir = join(slicesDir, sliceEntry.name);
-      const dstSliceDir = join(dstMilestoneDir, "slices", sliceEntry.name);
-
-      try {
-        for (const fileEntry of readdirSync(srcSliceDir, { withFileTypes: true })) {
-          if (!fileEntry.isFile()) continue;
-          if (!fileEntry.name.endsWith("-ASSESSMENT.md")) continue;
-
-          const srcFile = join(srcSliceDir, fileEntry.name);
-          try {
-            const srcContent = readFileSync(srcFile, "utf-8");
-            if (!VERDICT_RE.test(srcContent)) continue; // no verdict in source — skip
-
-            // Source has a verdict — force-copy into worktree
-            mkdirSync(dstSliceDir, { recursive: true });
-            safeCopy(srcFile, join(dstSliceDir, fileEntry.name), { force: true });
-          } catch (err) {
-            /* non-fatal per file */
-            logWarning("worktree", `assessment force-copy failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-      } catch (err) {
-        /* non-fatal per slice */
-        logWarning("worktree", `assessment slice scan failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  } catch (err) {
-    /* non-fatal */
-    logWarning("worktree", `assessment sync failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 // ─── Module State ──────────────────────────────────────────────────────────
@@ -400,7 +334,7 @@ function clearProjectRootStateFiles(basePath: string, milestoneId: string): void
             } catch (err) {
               // ENOENT/EISDIR are expected for already-removed or directory entries (#3597)
               const code = (err as NodeJS.ErrnoException).code;
-              if (!_isExpectedWorktreeUnlinkErrorForTest(code)) {
+              if (!_isExpectedWorktreeUnlinkError(code)) {
                 logWarning("worktree", `untracked file unlink failed: ${err instanceof Error ? err.message : String(err)}`);
               }
             }
@@ -479,199 +413,30 @@ function cleanupSquashConflictState(basePath: string): void {
  * Non-fatal — sync failure should never block dispatch.
  */
 /**
- * Scope-typed variant of syncProjectRootToWorktree.
- *
- * Takes an explicit (rootScope, worktreeScope) pair where rootScope is the
- * project root and worktreeScope is the auto-worktree. Direction is encoded
- * in argument order. Asserts both scopes belong to the same workspace identity
- * to prevent silent mismatch bugs.
- */
-export function syncProjectRootToWorktreeByScope(
-  rootScope: MilestoneScope,
-  worktreeScope: MilestoneScope,
-): void {
-  if (rootScope.workspace.identityKey !== worktreeScope.workspace.identityKey) {
-    throw new Error(
-      `syncProjectRootToWorktreeByScope: scope identity mismatch — ` +
-      `rootScope.identityKey="${rootScope.workspace.identityKey}" ` +
-      `worktreeScope.identityKey="${worktreeScope.workspace.identityKey}"`,
-    );
-  }
-  if (rootScope.milestoneId !== worktreeScope.milestoneId) {
-    throw new Error(
-      `syncProjectRootToWorktreeByScope: milestoneId mismatch — ` +
-      `rootScope.milestoneId="${rootScope.milestoneId}" worktreeScope.milestoneId="${worktreeScope.milestoneId}"`,
-    );
-  }
-  const projectRoot = rootScope.workspace.projectRoot;
-  const worktreePath_ = worktreeScope.workspace.worktreeRoot ?? worktreeScope.workspace.projectRoot;
-  const milestoneId = rootScope.milestoneId;
-  syncProjectRootToWorktree(projectRoot, worktreePath_, milestoneId);
-}
-
-/**
- * @deprecated Use syncProjectRootToWorktreeByScope instead.
- * TODO(C-future): remove once all callers migrated.
+ * Path-string entry point to WorktreeStateProjection.projectRootToWorktree.
+ * Production code goes through the Module class; this delegator survives so
+ * the projection-invariant tests (#1886, #2184, #2478, #2821) can exercise
+ * the bodies with raw paths.
  */
 export function syncProjectRootToWorktree(
   projectRoot: string,
   worktreePath_: string,
   milestoneId: string | null,
 ): void {
-  if (!worktreePath_ || !projectRoot || worktreePath_ === projectRoot) return;
-  if (!milestoneId) return;
-
-  const contract = resolveGsdPathContract(worktreePath_, projectRoot);
-  const prGsd = contract.projectGsd;
-  const wtGsd = contract.worktreeGsd ?? join(worktreePath_, ".gsd");
-
-  // When .gsd is a symlink to the same external directory in both locations,
-  // cpSync rejects the copy because source === destination (ERR_FS_CP_EINVAL).
-  // Compare realpaths and skip when they resolve to the same physical path (#2184).
-  if (isSamePath(prGsd, wtGsd)) return;
-
-  // Copy milestone directory from project root to worktree — additive only.
-  // force:false prevents cpSync from overwriting existing worktree files.
-  // Without this, worktree-local files (e.g. VALIDATION.md written
-  // by validate-milestone) get clobbered by stale project root copies,
-  // causing an infinite re-validation loop (#1886).
-  safeCopyRecursive(
-    join(prGsd, "milestones", milestoneId),
-    join(wtGsd, "milestones", milestoneId),
-    { force: false },
-  );
-
-  // Force-sync ASSESSMENT files that have a verdict from project root (#2821).
-  // The additive-only copy above preserves worktree-local files, but
-  // ASSESSMENT files are special: after run-uat writes a verdict and post-unit
-  // syncs it to the project root, the worktree may retain a stale copy (e.g.
-  // verdict:fail while the project root has verdict:pass from a retry). On
-  // session resume the DB is rebuilt from disk, and if the stale ASSESSMENT
-  // persists, checkNeedsRunUat finds no passing verdict → re-dispatches
-  // run-uat indefinitely (stuck-loop ×9).
-  forceOverwriteAssessmentsWithVerdict(
-    join(prGsd, "milestones", milestoneId),
-    join(wtGsd, "milestones", milestoneId),
-  );
-
-  // Forward-sync completed-units.json from project root to worktree.
-  // Project root is authoritative for completion state after crash recovery;
-  // without this, the worktree re-dispatches already-completed units (#1886).
-  safeCopy(
-    join(prGsd, "completed-units.json"),
-    join(wtGsd, "completed-units.json"),
-    { force: true },
-  );
-
-  // Delete a legacy worktree-local gsd.db ONLY if it is empty (0 bytes).
-  // Runtime opens contract.projectDb; this cleanup only removes corrupt
-  // pre-upgrade local DB projections.
-  try {
-    const wtDb = join(wtGsd, "gsd.db");
-    let deleteSidecars = false;
-    if (existsSync(wtDb)) {
-      const size = statSync(wtDb).size;
-      if (size === 0) {
-        unlinkSync(wtDb);
-        deleteSidecars = true;
-      }
-    } else {
-      // Main DB already missing — sidecars are orphaned from a previous
-      // partial cleanup and must still be removed.
-      deleteSidecars = true;
-    }
-    // Always clean up WAL/SHM sidecar files when the main DB was deleted
-    // or is already missing. Orphaned WAL/SHM files cause SQLite WAL
-    // recovery on next open, which triggers a CPU spin on Node 24's
-    // node:sqlite DatabaseSync implementation (#2478).
-    if (deleteSidecars) {
-      for (const suffix of ["-wal", "-shm"]) {
-        const f = wtDb + suffix;
-        if (existsSync(f)) {
-          unlinkSync(f);
-        }
-      }
-    }
-  } catch (err) {
-    /* non-fatal */
-    logWarning("worktree", `worktree DB cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  _projectRootToWorktreeImpl(projectRoot, worktreePath_, milestoneId);
 }
 
 /**
- * Scope-typed variant of syncStateToProjectRoot.
- *
- * Takes an explicit (worktreeScope, rootScope) pair. Direction is encoded in
- * argument order (worktree → root). Asserts both scopes belong to the same
- * workspace identity to prevent silent mismatch bugs.
- */
-export function syncStateToProjectRootByScope(
-  worktreeScope: MilestoneScope,
-  rootScope: MilestoneScope,
-): void {
-  if (worktreeScope.workspace.identityKey !== rootScope.workspace.identityKey) {
-    throw new Error(
-      `syncStateToProjectRootByScope: scope identity mismatch — ` +
-      `worktreeScope.identityKey="${worktreeScope.workspace.identityKey}" ` +
-      `rootScope.identityKey="${rootScope.workspace.identityKey}"`,
-    );
-  }
-  if (worktreeScope.milestoneId !== rootScope.milestoneId) {
-    throw new Error(
-      `syncStateToProjectRootByScope: milestoneId mismatch — ` +
-      `worktreeScope.milestoneId="${worktreeScope.milestoneId}" rootScope.milestoneId="${rootScope.milestoneId}"`,
-    );
-  }
-  const worktreePath_ = worktreeScope.workspace.worktreeRoot ?? worktreeScope.workspace.projectRoot;
-  const projectRoot = rootScope.workspace.projectRoot;
-  const milestoneId = worktreeScope.milestoneId;
-  syncStateToProjectRoot(worktreePath_, projectRoot, milestoneId);
-}
-
-/**
- * Sync worktree diagnostics from worktree to project root.
- * Only runs when inside an auto-worktree (worktreePath differs from projectRoot).
- * DB/project-root state remains authoritative; markdown projections are not
- * copied from the worktree back to the project root.
- * Non-fatal — sync failure should never block dispatch.
- * @deprecated Use syncStateToProjectRootByScope instead.
- * TODO(C-future): remove once all callers migrated.
+ * Path-string entry point to WorktreeStateProjection.projectWorktreeToRoot.
+ * Production code goes through the Module class; this delegator survives so
+ * the projection-invariant tests can exercise the body with raw paths.
  */
 export function syncStateToProjectRoot(
   worktreePath_: string,
   projectRoot: string,
   milestoneId: string | null,
 ): void {
-  if (!worktreePath_ || !projectRoot || worktreePath_ === projectRoot) return;
-  if (!milestoneId) return;
-
-  const contract = resolveGsdPathContract(worktreePath_, projectRoot);
-  const wtGsd = contract.worktreeGsd ?? join(worktreePath_, ".gsd");
-  const prGsd = contract.projectGsd;
-
-  // When .gsd is a symlink to the same external directory in both locations,
-  // cpSync rejects the copy because source === destination (ERR_FS_CP_EINVAL).
-  // Compare realpaths and skip when they resolve to the same physical path (#2184).
-  if (isSamePath(wtGsd, prGsd)) return;
-
-  // metrics.json — session cost/token tracking (#2313).
-  // Without this, metrics accumulated in the worktree are invisible from the
-  // project root and never appear in the dashboard or skill-health reports.
-  safeCopy(join(wtGsd, "metrics.json"), join(prGsd, "metrics.json"), { force: true });
-
-  // completed-units.json — runtime completion diagnostics used to avoid
-  // re-dispatching work already completed in an isolated worktree.
-  safeCopy(join(wtGsd, "completed-units.json"), join(prGsd, "completed-units.json"), { force: true });
-
-  // Runtime records — unit dispatch diagnostics used by selfHealRuntimeRecords().
-  // Without this, a crash during a unit leaves the runtime record only in the
-  // worktree. If the next session resolves basePath before worktree re-entry,
-  // selfHeal can't find or clear the stale record (#769).
-  safeCopyRecursive(
-    join(wtGsd, "runtime", "units"),
-    join(prGsd, "runtime", "units"),
-    { force: true },
-  );
+  _projectWorktreeToRootImpl(worktreePath_, projectRoot, milestoneId);
 }
 
 // ─── Resource Staleness ───────────────────────────────────────────────────
@@ -1033,51 +798,7 @@ export function syncWorktreeStateBack(
   worktreePath: string,
   milestoneId: string,
 ): { synced: string[] } {
-  const contract = resolveGsdPathContract(worktreePath, mainBasePath);
-  const mainGsd = contract.projectGsd;
-  const wtGsd = contract.worktreeGsd ?? join(worktreePath, ".gsd");
-  const synced: string[] = [];
-
-  // If both resolve to the same directory (symlink), no sync needed
-  if (isSamePath(mainGsd, wtGsd)) return { synced };
-
-  if (!existsSync(wtGsd) || !existsSync(mainGsd)) return { synced };
-
-  // ── 0. Pre-upgrade worktree DB reconciliation ────────────────────────
-  // If the worktree has its own gsd.db (copied before the WAL transition),
-  // reconcile its hierarchy data into the project root DB before syncing
-  // files. This handles in-flight worktrees that were created before the
-  // upgrade to shared WAL mode.
-  const wtLocalDb = join(wtGsd, "gsd.db");
-  const mainDb = contract.projectDb;
-  if (existsSync(wtLocalDb) && existsSync(mainDb)) {
-    try {
-      reconcileWorktreeDb(mainDb, wtLocalDb);
-      synced.push("gsd.db (pre-upgrade reconcile)");
-    } catch (err) {
-      // Non-fatal — file sync below is the fallback
-      logError("worktree", `DB reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  // ── 1. Sync root-level diagnostic files back ─────────────────────────
-  // Markdown/JSON state projections remain project-root/DB authoritative.
-  // These diagnostic files are copied for observability only.
-  for (const f of ROOT_DIAGNOSTIC_FILES) {
-    const src = join(wtGsd, f);
-    const dst = join(mainGsd, f);
-    if (existsSync(src)) {
-      try {
-        cpSync(src, dst, { force: true });
-        synced.push(f);
-      } catch (err) {
-        /* non-fatal */
-        logWarning("worktree", `state file copy-back failed (${f}): ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  }
-
-  return { synced };
+  return _finalizeProjectionForMergeImpl(mainBasePath, worktreePath, milestoneId);
 }
 // ─── Worktree Post-Create Hook (#597) ────────────────────────────────────────
 
@@ -1176,7 +897,7 @@ export function enterBranchModeForMilestone(
       readIntegrationBranch(basePath, milestoneId) ?? undefined;
     const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
     const startPoint =
-      _resolveAutoWorktreeStartPointForTest(
+      _resolveAutoWorktreeStartPoint(
         integrationBranch,
         gitPrefs?.main_branch,
         (branchName) => nativeBranchExists(basePath, branchName),
@@ -1417,7 +1138,7 @@ export function createAutoWorktree(
     const integrationBranch =
       readIntegrationBranch(basePath, milestoneId) ?? undefined;
     const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
-    const startPoint = _resolveAutoWorktreeStartPointForTest(
+    const startPoint = _resolveAutoWorktreeStartPoint(
       integrationBranch,
       gitPrefs?.main_branch,
       (branchName) => nativeBranchExists(basePath, branchName),
@@ -1517,7 +1238,7 @@ export function teardownAutoWorktree(
         const contract = resolveGsdPathContract(previousCwd, originalBasePath);
         const worktreeDbPath = join(contract.worktreeGsd ?? join(previousCwd, ".gsd"), "gsd.db");
         const mainDbPath = contract.projectDb;
-        if (_shouldReconcileWorktreeDbForTest(worktreeDbPath, mainDbPath)) {
+        if (_shouldReconcileWorktreeDb(worktreeDbPath, mainDbPath)) {
           reconcileWorktreeDb(mainDbPath, worktreeDbPath);
         }
       } catch (err) {
@@ -1697,6 +1418,15 @@ export function getAutoWorktreeOriginalBase(): string | null {
   return getActiveWorkspace()?.projectRoot ?? null;
 }
 
+/**
+ * Test-only — resets the module-level `activeWorkspace` registry between
+ * runs. Production code never clears the registry directly; tests call this
+ * in `beforeEach`/`afterEach` to isolate registry-mutating cases. Renaming
+ * the underscore-prefixed `_*ForTest` exports it joins (slice 7 / step G of
+ * ADR-016) was deliberate: those wrapped real production helpers and lost
+ * the suffix; this one stays as the only legitimate test-scaffolding export
+ * because it has no production caller.
+ */
 export function _resetAutoWorktreeOriginalBaseForTests(): void {
   setActiveWorkspace(null);
 }
@@ -1816,7 +1546,7 @@ export function mergeMilestoneToMain(
       const contract = resolveGsdPathContract(worktreeCwd, originalBasePath_);
       const worktreeDbPath = join(contract.worktreeGsd ?? join(worktreeCwd, ".gsd"), "gsd.db");
       const mainDbPath = contract.projectDb;
-      if (_shouldReconcileWorktreeDbForTest(worktreeDbPath, mainDbPath)) {
+      if (_shouldReconcileWorktreeDb(worktreeDbPath, mainDbPath)) {
         reconcileWorktreeDb(mainDbPath, worktreeDbPath);
       }
     } catch (err) {

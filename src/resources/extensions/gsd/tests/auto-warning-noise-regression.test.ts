@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { buildFlatRateContext } from "../auto-model-selection.ts";
-import { _isSamePathForTest, _resetAutoWorktreeOriginalBaseForTests } from "../auto-worktree.ts";
+import { _isSamePath, _resetAutoWorktreeOriginalBaseForTests } from "../auto-worktree.ts";
 import {
   checkAutoStartAfterDiscuss,
   clearPendingAutoStart,
@@ -71,7 +71,7 @@ test("buildFlatRateContext invokes getProviderAuthMode with correct `this`", () 
 test("isSamePath returns false for missing paths without throwing", () => {
   const dir = mkdtempSync(join(tmpdir(), "gsd-same-path-"));
   try {
-    assert.equal(_isSamePathForTest(join(dir, "missing-a"), join(dir, "missing-b")), false);
+    assert.equal(_isSamePath(join(dir, "missing-a"), join(dir, "missing-b")), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     _resetAutoWorktreeOriginalBaseForTests();

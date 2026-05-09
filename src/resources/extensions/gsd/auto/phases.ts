@@ -72,6 +72,8 @@ import {
   getRequiredWorkflowToolsForAutoUnit,
   supportsStructuredQuestions,
 } from "../workflow-mcp.js";
+import { resolveManifest } from "../unit-context-manifest.js";
+import { createWorktreeSafetyModule, type WorktreeSafetyResult } from "../worktree-safety.js";
 
 // ─── Path Comparison Helper ───────────────────────────────────────────────
 /** Compare two paths for physical identity, tolerating trailing slashes and symlinks. */
@@ -88,6 +90,102 @@ export function shouldDegradeEmptyWorktreeToProjectRoot(
     projectRootClassification.kind !== "greenfield" &&
     projectRootClassification.kind !== "invalid-repo"
   );
+}
+
+function unitWritesSource(unitType: string): boolean | null {
+  const manifest = resolveManifest(unitType);
+  if (!manifest) return null;
+  return manifest.tools.mode === "all" || manifest.tools.mode === "docs";
+}
+
+function formatWorktreeSafetyFailure(result: Extract<WorktreeSafetyResult, { ok: false }>): string {
+  return `Worktree Safety failed (${result.kind}): ${result.reason} ${result.remediation}`;
+}
+
+function resolveEmptyWorktreeWithProjectContent(
+  unitRoot: string,
+  projectRoot: string,
+): boolean {
+  if (isSamePathLocal(unitRoot, projectRoot)) return false;
+  const worktreeClassification = classifyProject(unitRoot);
+  if (worktreeClassification.kind !== "greenfield") return false;
+  const projectRootClassification = classifyProject(projectRoot);
+  return shouldDegradeEmptyWorktreeToProjectRoot(worktreeClassification, projectRootClassification);
+}
+
+async function validateSourceWriteWorktreeSafety(
+  ic: IterationContext,
+  unitType: string,
+  unitId: string,
+  milestoneId: string | undefined,
+  phase: string,
+): Promise<{ action: "break"; reason: string } | null> {
+  const { ctx, pi, s, deps } = ic;
+  if (!s.basePath) return null;
+
+  // Custom engine workflows (graph-driven, registered via run dirs) define
+  // their own step ids that are not in the GSD UnitContextManifest. Don't
+  // fail closed for those — the custom engine owns its own dispatch
+  // contract. The fail-closed safety check applies only to built-in GSD
+  // units whose Tool Contract is registered in the manifest. Use a truthy
+  // check so undefined (test sessions that never set the field) routes
+  // through the safety check, matching the regression test contract.
+  if (s.activeEngineId) return null;
+
+  const writesSource = unitWritesSource(unitType);
+  if (writesSource === null) {
+    const msg = `Worktree Safety failed (missing-tool-contract): missing Tool Contract for ${unitType}. Add a UnitContextManifest entry before dispatching this Unit.`;
+    debugLog("worktreeSafety", {
+      phase,
+      unitType,
+      unitId,
+      milestoneId,
+      result: { ok: false, kind: "missing-tool-contract", reason: msg },
+      basePath: s.basePath,
+    });
+    ctx.ui.notify(msg, "error");
+    await deps.stopAuto(ctx, pi, msg);
+    return { action: "break", reason: "missing-tool-contract" };
+  }
+  if (!writesSource) return null;
+
+  const projectRoot = s.canonicalProjectRoot ?? resolveWorktreeProjectRoot(s.basePath, s.originalBasePath);
+  if (deps.getIsolationMode(projectRoot) !== "worktree") return null;
+
+  const safety = createWorktreeSafetyModule();
+  const result = safety.validateUnitRoot({
+    unitType,
+    unitId,
+    writeScope: "source-writing",
+    projectRoot,
+    unitRoot: s.basePath,
+    milestoneId,
+    expectedBranch: milestoneId ? deps.autoWorktreeBranch(milestoneId) : null,
+    emptyWorktreeWithProjectContent: resolveEmptyWorktreeWithProjectContent(s.basePath, projectRoot),
+    lease: s.workerId
+      ? {
+          required: true,
+          held: s.currentMilestoneId === milestoneId && s.milestoneLeaseToken !== null,
+          owner: s.workerId,
+        }
+      : undefined,
+  });
+
+  if (result.ok) return null;
+
+  const msg = formatWorktreeSafetyFailure(result);
+  debugLog("worktreeSafety", {
+    phase,
+    unitType,
+    unitId,
+    milestoneId,
+    result,
+    basePath: s.basePath,
+    projectRoot,
+  });
+  ctx.ui.notify(msg, "error");
+  await deps.stopAuto(ctx, pi, msg);
+  return { action: "break", reason: result.kind };
 }
 
 // ─── Session timeout auto-resume state ────────────────────────────────────────
@@ -593,13 +691,10 @@ export async function runPreDispatch(
   if (
     s.originalBasePath &&
     !isSamePathLocal(s.basePath, s.originalBasePath) &&
-    s.currentMilestoneId
+    s.currentMilestoneId &&
+    s.scope
   ) {
-    deps.syncProjectRootToWorktree(
-      s.originalBasePath,
-      s.basePath,
-      s.currentMilestoneId,
-    );
+    deps.worktreeProjection.projectRootToWorktree(s.scope);
   }
 
   // Derive state — use canonical project root so the cache key is stable
@@ -822,9 +917,15 @@ export async function runPreDispatch(
         deps.captureIntegrationBranch(s.basePath, mid);
       }
       const enterResult = deps.lifecycle.enterMilestone(mid, ctx.ui);
-      if (!enterResult.ok && enterResult.reason === "lease-conflict") {
-        await deps.pauseAuto(ctx, pi);
-        return { action: "break", reason: "milestone-lease-conflict" };
+      if (!enterResult.ok) {
+        ctx.ui.notify(
+          `Milestone transition stopped: failed to enter ${mid} (${enterResult.reason}).`,
+          "error",
+        );
+        if (enterResult.reason === "lease-conflict") {
+          await deps.pauseAuto(ctx, pi);
+        }
+        return { action: "break", reason: "milestone-enter-failed" };
       }
     } else {
       // mid is undefined — no milestone to capture integration branch for
@@ -1153,21 +1254,14 @@ export async function runDispatch(
     return { action: "break", reason: "prior-slice-blocker" };
   }
 
-  // Execute-task needs a real writable checkout. The same health check also
-  // exists in runUnitPhase, but the stuck-window detector runs before that
-  // phase. Check here too so repeated derivations of a broken worktree stop
-  // with the actionable worktree error instead of the generic stuck-loop error.
-  if (s.basePath && unitType === "execute-task") {
-    const gitMarker = join(s.basePath, ".git");
-    const hasGit = deps.existsSync(gitMarker);
-    if (!hasGit) {
-      const msg = `Worktree health check failed: ${s.basePath} has no .git — refusing to dispatch ${unitType} ${unitId}`;
-      debugLog("autoLoop", { phase: "dispatch-worktree-health-fail", basePath: s.basePath, hasGit });
-      ctx.ui.notify(msg, "error");
-      await deps.stopAuto(ctx, pi, msg);
-      return { action: "break", reason: "worktree-invalid" };
-    }
-  }
+  const worktreeSafetyBlock = await validateSourceWriteWorktreeSafety(
+    ic,
+    unitType,
+    unitId,
+    mid,
+    "pre-dispatch",
+  );
+  if (worktreeSafetyBlock) return worktreeSafetyBlock;
 
   // ── Sliding-window stuck detection with graduated recovery ──
   const derivedKey = `${unitType}/${unitId}`;
@@ -1570,27 +1664,25 @@ export async function runUnitPhase(
     unitId,
   });
 
-  // ── Worktree health check (#1833, #1843) ────────────────────────────
-  // Verify the working directory is a valid git checkout with project
-  // files before dispatching work. A broken worktree causes agents to
-  // hallucinate summaries since they cannot read or write any files.
-  // Uses project classification so project presence is not conflated with
-  // ecosystem marker detection. Static/minimal repos become untyped-existing.
+  const worktreeSafetyBlock = await validateSourceWriteWorktreeSafety(
+    ic,
+    unitType,
+    unitId,
+    mid,
+    "unit-execution",
+  );
+  if (worktreeSafetyBlock) return worktreeSafetyBlock;
+
+  // ── Project classification notice (#1833, #1843) ─────────────────────
+  // Worktree Safety owns source-write root validity. Classification now only
+  // shapes user/model guidance for valid roots.
   let projectClassification: ReturnType<typeof classifyProject> | null = null;
   if (s.basePath && unitType === "execute-task") {
-    const gitMarker = join(s.basePath, ".git");
-    const hasGit = deps.existsSync(gitMarker);
-    if (!hasGit) {
-      const msg = `Worktree health check failed: ${s.basePath} has no .git — refusing to dispatch ${unitType} ${unitId}`;
-      debugLog("runUnitPhase", { phase: "worktree-health-fail", basePath: s.basePath, hasGit });
-      ctx.ui.notify(msg, "error");
-      await deps.stopAuto(ctx, pi, msg);
-      return { action: "break", reason: "worktree-invalid" };
-    }
     projectClassification = classifyProject(s.basePath);
     if (projectClassification.kind === "invalid-repo") {
       const msg = `Worktree health check failed: ${s.basePath} classified as invalid-repo (${projectClassification.reason}) — refusing to dispatch ${unitType} ${unitId}`;
       debugLog("runUnitPhase", { phase: "worktree-health-invalid-repo", basePath: s.basePath, classification: projectClassification });
+      const hasGit = deps.existsSync(join(s.basePath, ".git"));
       if (_shouldProceedWithInvalidRepoClassificationForTest(projectClassification.reason, hasGit)) {
         ctx.ui.notify(
           `Warning: ${s.basePath} project classification could not confirm .git; assuming it has no project content yet — proceeding as greenfield project because worktree health reported .git present`,
@@ -1600,27 +1692,6 @@ export async function runUnitPhase(
         ctx.ui.notify(msg, "error");
         await deps.stopAuto(ctx, pi, msg);
         return { action: "break", reason: "worktree-invalid" };
-      }
-    } else if (projectClassification.kind === "greenfield") {
-      const projectRoot = s.canonicalProjectRoot;
-      if (!isSamePathLocal(s.basePath, projectRoot)) {
-        const projectRootClassification = classifyProject(projectRoot);
-        if (shouldDegradeEmptyWorktreeToProjectRoot(projectClassification, projectRootClassification)) {
-          debugLog("runUnitPhase", {
-            phase: "worktree-health-degrade-to-project-root",
-            worktreePath: s.basePath,
-            projectRoot,
-            worktreeClassification: projectClassification,
-            projectRootClassification,
-          });
-          ctx.ui.notify(
-            `Warning: ${s.basePath} has no project content, but ${projectRoot} does. Continuing in project root because the milestone worktree cannot represent untracked project files.`,
-            "warning",
-          );
-          s.basePath = projectRoot;
-          s.isolationDegraded = true;
-          projectClassification = projectRootClassification;
-        }
       }
     }
 

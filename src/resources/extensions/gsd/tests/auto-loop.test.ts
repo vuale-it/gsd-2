@@ -1,6 +1,6 @@
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +23,7 @@ import { runDispatch } from "../auto/phases.js";
 import { detectStuck } from "../auto/detect-stuck.js";
 import type { UnitResult, AgentEndEvent } from "../auto/types.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
+import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
 import type { SessionLockStatus } from "../session-lock.js";
 
@@ -668,7 +669,6 @@ function makeMockDeps(
       preferences: { uok: { plan_v2: { enabled: false } } },
     }),
     preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-    syncProjectRootToWorktree: () => {},
     checkResourcesStale: () => null,
     validateSessionLock: () => ({ valid: true } as SessionLockStatus),
     updateSessionLock: () => {
@@ -732,23 +732,6 @@ function makeMockDeps(
     readFileSync: () => "",
     atomicWriteSync: () => {},
     GitServiceImpl: class {} as any,
-    resolver: {
-      get workPath() {
-        return "/tmp/project";
-      },
-      get projectRoot() {
-        return "/tmp/project";
-      },
-      get lockPath() {
-        return "/tmp/project";
-      },
-      enterMilestone: () => {
-        assert.fail("auto-loop should call deps.lifecycle.enterMilestone, not resolver.enterMilestone");
-      },
-      exitMilestone: () => {},
-      mergeAndExit: () => {},
-      mergeAndEnterNext: () => {},
-    } as any,
     lifecycle: {
       enterMilestone: () => ({ ok: true, mode: "worktree", path: "/tmp/project" }),
       exitMilestone: (_mid: string, opts: { merge: boolean }) => ({
@@ -757,6 +740,7 @@ function makeMockDeps(
         codeFilesChanged: false,
       }),
     } as any,
+    worktreeProjection: new WorktreeStateProjection(),
     postUnitPreVerification: async () => {
       callLog.push("postUnitPreVerification");
       return "continue" as const;
@@ -978,25 +962,6 @@ test("autoLoop marks transition merge complete before postflight recovery stop",
       message: "git stash pop stash@{0} failed after merge of milestone M001",
       stashRef: "stash@{0}",
     }),
-    resolver: {
-      get workPath() {
-        return "/tmp/project";
-      },
-      get projectRoot() {
-        return "/tmp/project";
-      },
-      get lockPath() {
-        return "/tmp/project";
-      },
-      enterMilestone: () => {
-        assert.fail("must not enter the next milestone after postflight recovery fails");
-      },
-      exitMilestone: () => {},
-      mergeAndExit: () => {
-        mergeCalls += 1;
-      },
-      mergeAndEnterNext: () => {},
-    } as any,
     lifecycle: {
       enterMilestone: () => {
         assert.fail("must not enter the next milestone after postflight recovery fails");
@@ -1010,7 +975,11 @@ test("autoLoop marks transition merge complete before postflight recovery stop",
       deps.callLog.push("stopAuto");
       stopReason = reason ?? "";
       if (!s.milestoneMergedInPhases) {
-        deps.resolver.mergeAndExit("M001", ctx.ui);
+        deps.lifecycle.exitMilestone(
+          "M001",
+          { merge: true },
+          { notify: ctx.ui.notify.bind(ctx.ui) },
+        );
       }
     },
   });
@@ -1183,7 +1152,7 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
       deps.callLog.push("postUnitPostVerification");
       s.sidecarQueue.push({
         kind: "hook" as const,
-        unitType: "hook/review",
+        unitType: "run-uat",
         unitId: "M001/S01/T01/review",
         prompt: "review the code",
       });
@@ -1670,7 +1639,7 @@ test("autoLoop drains sidecar queue after postUnitPostVerification enqueues item
       // First call (main unit): enqueue a sidecar item
       s.sidecarQueue.push({
         kind: "hook" as const,
-        unitType: "hook/review",
+        unitType: "run-uat",
         unitId: "M001/S01/T01/review",
         prompt: "review the code",
       });
@@ -1692,11 +1661,17 @@ test("autoLoop drains sidecar queue after postUnitPostVerification enqueues item
   const loopPromise = autoLoop(ctx, pi, s, deps);
 
   // Wait for main unit's runUnit to be awaiting
-  await new Promise((r) => setTimeout(r, 50));
+  for (let i = 0; !_hasPendingResolveForTest() && i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(_hasPendingResolveForTest(), true, "main unit should be awaiting agent_end");
   resolveAgentEnd(makeEvent()); // resolve main unit
 
   // Wait for the sidecar unit's runUnit to be awaiting
-  await new Promise((r) => setTimeout(r, 50));
+  for (let i = 0; !_hasPendingResolveForTest() && postVerCallCount < 2 && i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(_hasPendingResolveForTest(), true, "sidecar unit should be awaiting agent_end");
   resolveAgentEnd(makeEvent()); // resolve sidecar unit
 
   await loopPromise;
@@ -2115,7 +2090,7 @@ test("autoLoop lifecycle: advances through research → plan → execute → ver
     { unitType: "research-slice", unitId: "M001/S01", prompt: "research" },
     { unitType: "plan-slice", unitId: "M001/S01", prompt: "plan" },
     { unitType: "execute-task", unitId: "M001/S01/T01", prompt: "execute" },
-    { unitType: "verify-slice", unitId: "M001/S01", prompt: "verify" },
+    { unitType: "run-uat", unitId: "M001/S01", prompt: "verify" },
     { unitType: "complete-slice", unitId: "M001/S01", prompt: "complete" },
   ];
 
@@ -2185,8 +2160,8 @@ test("autoLoop lifecycle: advances through research → plan → execute → ver
     `should have dispatched execute-task, got: ${dispatchedUnitTypes.join(", ")}`,
   );
   assert.ok(
-    dispatchedUnitTypes.includes("verify-slice"),
-    `should have dispatched verify-slice, got: ${dispatchedUnitTypes.join(", ")}`,
+    dispatchedUnitTypes.includes("run-uat"),
+    `should have dispatched run-uat, got: ${dispatchedUnitTypes.join(", ")}`,
   );
   assert.ok(
     dispatchedUnitTypes.includes("complete-slice"),
@@ -2218,7 +2193,7 @@ test("autoLoop lifecycle: advances through research → plan → execute → ver
       "research-slice",
       "plan-slice",
       "execute-task",
-      "verify-slice",
+      "run-uat",
       "complete-slice",
     ],
     "dispatched unit types should follow the full lifecycle sequence",
@@ -2713,7 +2688,7 @@ test("autoLoop rejects complete-slice with 0 tool calls as context-exhausted (#2
 
 // ─── Worktree health check (#1833) ────────────────────────────────────────
 
-test("autoLoop stops when worktree has no .git for execute-task (#1833)", async () => {
+test("autoLoop stops when Worktree Safety finds no .git marker for execute-task (#1833)", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -2724,7 +2699,16 @@ test("autoLoop stops when worktree has no .git for execute-task (#1833)", async 
   const notifications: string[] = [];
   ctx.ui.notify = (msg: string) => { notifications.push(msg); };
 
-  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-loop-"));
+  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
+  mkdirSync(worktreeRoot, { recursive: true });
+  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
+
+  const s = makeLoopSession({
+    basePath: worktreeRoot,
+    originalBasePath: projectRoot,
+    canonicalProjectRoot: projectRoot,
+  });
 
   const deps = makeMockDeps({
     deriveState: async () => {
@@ -2738,8 +2722,7 @@ test("autoLoop stops when worktree has no .git for execute-task (#1833)", async 
         blockers: [],
       } as any;
     },
-    // .git does not exist in the broken worktree
-    existsSync: (p: string) => !p.endsWith(".git"),
+    getIsolationMode: () => "worktree",
   });
 
   await autoLoop(ctx, pi, s, deps);
@@ -2749,15 +2732,15 @@ test("autoLoop stops when worktree has no .git for execute-task (#1833)", async 
     "should stop auto-mode when worktree is invalid",
   );
   const healthNotification = notifications.find(
-    (n) => n.includes("Worktree health check failed") && n.includes("no .git"),
+    (n) => n.includes("Worktree Safety failed") && n.includes("worktree-git-marker-missing"),
   );
   assert.ok(
     healthNotification,
-    "should notify about missing .git in worktree",
+    "should notify about missing worktree .git marker",
   );
 });
 
-test("dispatch health check wins before stuck detection for execute-task without .git", async () => {
+test("dispatch Worktree Safety wins before stuck detection for execute-task without .git", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -2765,9 +2748,18 @@ test("dispatch health check wins before stuck detection for execute-task without
   const notifications: string[] = [];
   ctx.ui.notify = (msg: string) => { notifications.push(msg); };
 
-  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-dispatch-"));
+  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
+  mkdirSync(worktreeRoot, { recursive: true });
+  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
+
+  const s = makeLoopSession({
+    basePath: worktreeRoot,
+    originalBasePath: projectRoot,
+    canonicalProjectRoot: projectRoot,
+  });
   const deps = makeMockDeps({
-    existsSync: (p: string) => !p.endsWith(".git"),
+    getIsolationMode: () => "worktree",
   });
   const result = await runDispatch(
     {
@@ -2803,15 +2795,85 @@ test("dispatch health check wins before stuck detection for execute-task without
   );
 
   assert.equal(result.action, "break");
-  assert.equal(result.reason, "worktree-invalid");
-  assert.ok(deps.callLog.includes("stopAuto"), "should stop through worktree health check");
+  assert.equal(result.reason, "worktree-git-marker-missing");
+  assert.ok(deps.callLog.includes("stopAuto"), "should stop through Worktree Safety");
   assert.ok(
-    notifications.some((n) => n.includes("Worktree health check failed") && n.includes("no .git")),
-    "should notify about missing .git",
+    notifications.some((n) => n.includes("Worktree Safety failed") && n.includes("worktree-git-marker-missing")),
+    "should notify about missing worktree .git marker",
   );
   assert.ok(
     !notifications.some((n) => n.includes("Stuck on execute-task")),
     "stuck-loop message must not mask the worktree health failure",
+  );
+});
+
+test("dispatch Worktree Safety stops unknown unit types with missing Tool Contract", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  const pi = makeMockPi();
+  const notifications: string[] = [];
+  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
+
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-missing-contract-"));
+  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
+  mkdirSync(worktreeRoot, { recursive: true });
+  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
+
+  const s = makeLoopSession({
+    basePath: worktreeRoot,
+    originalBasePath: projectRoot,
+    canonicalProjectRoot: projectRoot,
+  });
+  const deps = makeMockDeps({
+    getIsolationMode: () => "worktree",
+    resolveDispatch: async () => {
+      deps.callLog.push("resolveDispatch");
+      return {
+        action: "dispatch" as const,
+        unitType: "new-source-writing-unit-without-manifest",
+        unitId: "M001/S01/T01",
+        prompt: "do the thing",
+      };
+    },
+  });
+
+  const result = await runDispatch(
+    {
+      ctx,
+      pi,
+      s,
+      deps,
+      prefs: undefined,
+      iteration: 1,
+      flowId: "test-flow",
+      nextSeq: () => 1,
+    },
+    {
+      state: {
+        phase: "executing",
+        activeMilestone: { id: "M001", title: "Test", status: "active" },
+        activeSlice: { id: "S01", title: "Slice 1" },
+        activeTask: { id: "T01" },
+        registry: [{ id: "M001", status: "active" }],
+        blockers: [],
+      } as any,
+      mid: "M001",
+      midTitle: "Test",
+    },
+    {
+      recentUnits: [],
+      stuckRecoveryAttempts: 0,
+      consecutiveFinalizeTimeouts: 0,
+    },
+  );
+
+  assert.equal(result.action, "break");
+  assert.equal(result.reason, "missing-tool-contract");
+  assert.ok(deps.callLog.includes("stopAuto"), "should stop when the Tool Contract is missing");
+  assert.ok(
+    notifications.some((n) => n.includes("missing Tool Contract for new-source-writing-unit-without-manifest")),
+    "should notify with an actionable missing Tool Contract reason",
   );
 });
 
@@ -2890,7 +2952,7 @@ test("pre-dispatch replace resolves final unit before dispatch health and stuck 
     runPreDispatchHooks: () => ({
       firedHooks: ["review"],
       action: "replace",
-      unitType: "hook/review",
+      unitType: "run-uat",
       prompt: "review before executing",
       model: "review-model",
     }),
@@ -2931,7 +2993,7 @@ test("pre-dispatch replace resolves final unit before dispatch health and stuck 
   );
 
   assert.equal(result.action, "next");
-  assert.equal(result.data?.unitType, "hook/review");
+  assert.equal(result.data?.unitType, "run-uat");
   assert.equal(result.data?.finalPrompt, "review before executing");
   assert.equal(result.data?.hookModelOverride, "review-model");
   assert.ok(!deps.callLog.includes("stopAuto"), "replace hook should not stop on execute-task health");
@@ -2940,7 +3002,7 @@ test("pre-dispatch replace resolves final unit before dispatch health and stuck 
     [
       "execute-task/M001/S01/T01",
       "execute-task/M001/S01/T01",
-      "hook/review/M001/S01/T01",
+      "run-uat/M001/S01/T01",
     ],
     "stuck accounting should record the final replaced unit",
   );

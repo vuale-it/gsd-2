@@ -18,8 +18,8 @@ import type {
   VerificationResult,
 } from "../auto-verification.js";
 import type { DispatchAction, DispatchContext } from "../auto-dispatch.js";
-import type { WorktreeResolver } from "../worktree-resolver.js";
 import type { WorktreeLifecycle } from "../worktree-lifecycle.js";
+import type { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { CmuxLogLevel } from "../../shared/cmux-events.js";
 import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
@@ -75,12 +75,9 @@ export interface LoopDeps {
     basePath: string,
   ) => Promise<{ proceed: boolean; reason?: string; fixesApplied: string[] }>;
 
-  // Worktree sync
-  syncProjectRootToWorktree: (
-    originalBase: string,
-    basePath: string,
-    milestoneId: string | null,
-  ) => void;
+  // Worktree state projection (ADR-016 — single Module Interface for all
+  // direction-typed projection verbs)
+  worktreeProjection: WorktreeStateProjection;
 
   // Resource version guard
   checkResourcesStale: (version: string | null) => string | null;
@@ -270,10 +267,8 @@ export interface LoopDeps {
   // Git
   GitServiceImpl: new (basePath: string, gitConfig: unknown) => unknown;
 
-  // WorktreeResolver
-  resolver: WorktreeResolver;
-
-  // Worktree Lifecycle Module (ADR-016)
+  // Worktree Lifecycle Module (ADR-016 — single Module Interface for the
+  // milestone create/enter/exit/merge verbs)
   lifecycle: WorktreeLifecycle;
 
   // Post-unit processing
