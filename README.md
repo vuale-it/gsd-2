@@ -31,15 +31,20 @@ One command. Walk away. Come back to a built project with clean git history.
 
 ### Worktree Safety & Projection
 
-- **Worktree safety is now fail-closed** — write/edit operations enforce the worktree-isolation contract, custom-engine bypasses are explicit, and invalid project classification no longer silently proceeds.
-- **Lifecycle and projection are split into dedicated modules** — worktree entry, exit, root projection, and merge finalization now flow through clearer boundaries.
-- **Milestone merge closeout is harder to wedge** — stale leases, orphaned preflight stashes, branch-mode drift, reused branches, and wrong-branch merges are detected or recovered more reliably.
+- **Worktree safety is now fail-closed** — write/edit operations enforce the worktree-isolation contract before touching project files. If GSD cannot prove the active worktree is healthy, rooted correctly, and attached to the intended milestone, it stops instead of guessing.
+- **Custom-engine bypasses are explicit** — custom workflow units can opt out of worktree safety checks only through the dedicated path for that runtime. That keeps normal auto-mode writes protected while avoiding false failures for engines that do not use the same worktree lifecycle.
+- **Lifecycle and projection are split into dedicated modules** — worktree entry, exit, root projection, and merge finalization now flow through clearer boundaries. This makes it easier to reason about when state is copied into a milestone worktree, when it is projected back to the project root, and which module owns each step.
+- **Milestone merge closeout is harder to wedge** — stale leases, orphaned preflight stashes, branch-mode drift, reused branches, and wrong-branch merges are detected or recovered more reliably. If GSD finds completed work stranded in a milestone branch or preflight stash, startup and closeout paths now have better recovery hooks.
+- **Projection bypasses were closed** — post-unit and phase flows now route through the Worktree State Projection path instead of ad hoc file movement. That keeps database state, milestone artifacts, and root projections aligned during long-running auto-mode sessions.
 
 ### Memory, Context & Token Control
 
-- **Memory relevance improved** — artifacts now carry integrity fingerprints, memories track last-hit time, and relevance scoring uses time decay with safer fallback behavior.
-- **Provider tools are scoped per request** — tool availability is narrowed at request time, with provider-boundary token audit support.
-- **Prompt and workflow context got leaner** — repeated workflow context is capped, prompt templates use portable paths, and many high-volume workflow prompts were compacted.
+- **Memory relevance improved** — artifacts now carry integrity fingerprints, memories track last-hit time, and relevance scoring uses time decay. Recent, repeatedly useful memories can rank higher, while stale or superseded context is less likely to crowd out the current task.
+- **Artifact integrity is easier to preserve** — content hashes are retained through worktree reconciliation, so GSD can detect whether projected artifacts still match the state it expects. This supports safer recovery and reduces accidental drift between root and worktree state.
+- **Fallback memory search is safer** — when FTS5 is unavailable, LIKE-based fallback scans are capped and surfaced with warnings instead of silently becoming expensive. Memory ranking also guards against invalid decay settings producing unusable scores.
+- **Provider tools are scoped per request** — tool availability is narrowed at request time, with provider-boundary token audit support. The model sees the tools relevant to the current provider and task instead of carrying broad tool definitions through every request.
+- **Prompt and workflow context got leaner** — repeated workflow context is capped, prompt templates use portable paths, and many high-volume workflow prompts were compacted. The goal is less repeated instruction text in long sessions without removing the guardrails that keep planning, execution, and closeout on track.
+- **Token accounting is more accurate** — session tokens are reported separately from context in VS Code, the token encoder warms at startup, and provider-boundary audit hooks make it easier to understand where request size is coming from.
 
 ### TUI & Operator Experience
 
