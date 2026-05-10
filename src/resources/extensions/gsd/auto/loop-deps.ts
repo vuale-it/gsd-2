@@ -26,6 +26,14 @@ import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
 import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
 
+export interface StopAutoOptions {
+  completionWidget?: {
+    milestoneId?: string | null;
+    milestoneTitle?: string | null;
+    allMilestonesComplete?: boolean;
+  };
+}
+
 type PauseAutoFn = (
   ctx?: ExtensionContext,
   pi?: ExtensionAPI,
@@ -46,6 +54,7 @@ export interface LoopDeps {
     ctx?: ExtensionContext,
     pi?: ExtensionAPI,
     reason?: string,
+    options?: StopAutoOptions,
   ) => Promise<void>;
   pauseAuto: PauseAutoFn;
   clearUnitTimeout: () => void;

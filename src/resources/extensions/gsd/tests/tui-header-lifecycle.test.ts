@@ -11,7 +11,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { updateProgressWidget } from "../auto-dashboard.ts";
+import { setCompletionProgressWidget, updateProgressWidget } from "../auto-dashboard.ts";
 import type { GSDState } from "../types.ts";
 
 interface CapturedSetHeader {
@@ -205,6 +205,75 @@ test("auto-dashboard widget render output omits Ctrl+N guidance when isStepMode 
 
   const hasStepHint = lines.some((line: string) => line.includes("Ctrl+N to advance"));
   assert.equal(hasStepHint, false, "step-mode hint must NOT appear when isStepMode is false");
+
+  if (component.dispose) component.dispose();
+});
+
+test("completion dashboard keeps final milestone roll-up in the progress widget", (t) => {
+  const dir = makeTempDir("completion-widget");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  t.after(() => cleanup(dir));
+
+  let widgetFactory: ((tui: unknown, theme: unknown) => any) | undefined;
+
+  setCompletionProgressWidget(
+    {
+      hasUI: true,
+      ui: {
+        setWidget(_key: string, factory: any) { widgetFactory = factory; },
+        setHeader() {},
+        setStatus() {},
+      },
+    } as any,
+    {
+      milestoneId: "M003",
+      milestoneTitle: "Budget tracking",
+      oneLiner: "Added milestone budget warning output and provider roll-up details.",
+      successCriteriaResults: "Budget warnings appear at the end of milestone completion.",
+      requirementOutcomes: "Users can see what shipped without opening a fresh session.",
+      keyFiles: ["src/resources/extensions/gsd/auto-dashboard.ts", "src/resources/extensions/gsd/auto.ts"],
+      keyDecisions: ["Keep completion closeout in the same TUI surface."],
+      followUps: "None.",
+      reason: "Milestone M003 complete",
+      startedAt: Date.now() - 90_000,
+      totalCost: 21.29,
+      totalTokens: 1_000_000,
+      unitCount: 8,
+      cacheHitRate: 100,
+      contextPercent: 0.9,
+      contextWindow: 1_000_000,
+      completedSlices: 3,
+      totalSlices: 3,
+      basePath: dir,
+    },
+  );
+
+  assert.ok(widgetFactory, "completion widget factory must be installed");
+
+  const fakeTui = { requestRender() {} };
+  const fakeTheme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  const component = widgetFactory!(fakeTui, fakeTheme);
+  const output = component.render(140).join("\n");
+
+  assert.match(output, /Milestone M003 roll-up/);
+  assert.match(output, /Budget tracking/);
+  assert.match(output, /Outcome/);
+  assert.match(output, /Added milestone budget warning output/);
+  assert.match(output, /What changed/);
+  assert.match(output, /Budget warnings appear/);
+  assert.match(output, /Users can see what shipped/);
+  assert.match(output, /Keep completion closeout/);
+  assert.match(output, /Verification/);
+  assert.match(output, /Files: src\/resources\/extensions\/gsd\/auto-dashboard\.ts/);
+  assert.match(output, /Run totals 3\/3 slices/);
+  assert.match(output, /100% cache hit/);
+  assert.match(output, /\$21\.29/);
+  assert.match(output, /1\.0M tokens/);
+  assert.match(output, /8 units/);
+  assert.doesNotMatch(output, /COMPLETE-MILESTONE/);
 
   if (component.dispose) component.dispose();
 });

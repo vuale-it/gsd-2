@@ -1008,7 +1008,13 @@ export async function runPreDispatch(
         "All milestones complete.",
         "success",
       );
-      await deps.stopAuto(ctx, pi, "All milestones complete");
+      await deps.stopAuto(ctx, pi, "All milestones complete", {
+        completionWidget: {
+          milestoneId: s.currentMilestoneId,
+          milestoneTitle: midTitle,
+          allMilestonesComplete: true,
+        },
+      });
     } else if (incomplete.length === 0 && state.registry.length === 0) {
       // Empty registry — no milestones visible, likely a path resolution bug
       const diag = `basePath=${s.basePath}, phase=${state.phase}`;
@@ -1103,7 +1109,23 @@ export async function runPreDispatch(
       `Milestone ${mid} complete.`,
       "success",
     );
-    await closeoutAndStop(ctx, pi, s, deps, `Milestone ${mid} complete`);
+    if (s.currentUnit) {
+      await deps.closeoutUnit(
+        ctx,
+        s.basePath,
+        s.currentUnit.type,
+        s.currentUnit.id,
+        s.currentUnit.startedAt,
+        deps.buildSnapshotOpts(s.currentUnit.type, s.currentUnit.id),
+      );
+      s.currentUnit = null;
+    }
+    await deps.stopAuto(ctx, pi, `Milestone ${mid} complete`, {
+      completionWidget: {
+        milestoneId: mid,
+        milestoneTitle: midTitle,
+      },
+    });
     debugLog("autoLoop", { phase: "exit", reason: "milestone-complete" });
     deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "terminal", data: { reason: "milestone-complete", milestoneId: mid } });
     return { action: "break", reason: "milestone-complete" };
